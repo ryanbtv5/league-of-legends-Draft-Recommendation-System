@@ -104,7 +104,7 @@ def _extract_draft(match: dict[str, Any]) -> list[dict]:
                 "pick_order": pick_idx,
                 "champion_id": champ_id,
                 "role": ROLES[pick_idx] if pick_idx < len(ROLES) else "FILL",
-                "blue_picks_so_far": blue_picks,
+                "blue_picks_so_far": blue_picks[:pick_idx],
                 "red_picks_so_far": red_picks[:pick_idx],
                 "blue_bans": blue_bans,
                 "red_bans": red_bans,

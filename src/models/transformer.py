@@ -197,7 +197,38 @@ def train_epoch(
     return total_loss / len(loader.dataset)
 
 
-def build_sequence_dataloader(
+def evaluate_epoch(
+    model: DraftTransformer,
+    loader: DataLoader,
+    device: torch.device,
+) -> float:
+    """Compute mean cross-entropy loss on a DataLoader without updating weights.
+
+    Args:
+        model:  The Transformer model (set to eval mode internally).
+        loader: DataLoader yielding ``(tokens, targets)`` batches.
+        device: Compute device.
+
+    Returns:
+        Mean cross-entropy loss over the dataset.
+    """
+    model.eval()
+    criterion = nn.CrossEntropyLoss(ignore_index=0)
+    total_loss = 0.0
+
+    with torch.no_grad():
+        for tokens, targets in loader:
+            tokens, targets = tokens.to(device), targets.to(device)
+            padding_mask = (tokens == 0)
+            logits = model(tokens, src_key_padding_mask=padding_mask)
+            B, T, V = logits.shape
+            loss = criterion(logits.reshape(B * T, V), targets.reshape(B * T))
+            total_loss += loss.item() * B
+
+    return total_loss / len(loader.dataset)
+
+
+
     sequences: np.ndarray,
     batch_size: int = 256,
     shuffle: bool = True,

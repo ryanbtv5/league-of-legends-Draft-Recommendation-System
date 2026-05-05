@@ -181,7 +181,7 @@ def train_transformer(df: pd.DataFrame, encoder: ChampionEncoder, epochs: int = 
         mlflow.log_params({**cfg, "epochs": epochs})
         for epoch in range(1, epochs + 1):
             train_loss = tm.train_epoch(model, train_loader, optimizer, device)
-            val_loss = tm.train_epoch(model, val_loader, optimizer, device)
+            val_loss = tm.evaluate_epoch(model, val_loader, device)
             scheduler.step()
 
             mlflow.log_metrics({"train_loss": train_loss, "val_loss": val_loss}, step=epoch)
