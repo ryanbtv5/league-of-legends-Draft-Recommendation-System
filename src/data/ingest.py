@@ -73,8 +73,10 @@ _POSITION_MAP: dict[str, str] = {
 _PROGRESS_STEM = "_progress"
 _STRUCTURED_STEM = "matches_structured"
 
-# Sentinel sort key used when a pick's draft_turn is unknown
-_MISSING_DRAFT_TURN = 999
+# Sentinel sort key used when a pick's draft_turn is unknown.
+# Using a value well beyond the max valid draft turn (10) so missing
+# entries always sort last.
+_MISSING_DRAFT_TURN = 9999
 
 # Retry configuration
 _MAX_RETRIES = 5
@@ -124,9 +126,13 @@ class RiotClient:
             resp = self._session.get(url, params=params, timeout=10)
 
             if resp.status_code == 429:
-                retry_after = float(
-                    resp.headers.get("Retry-After", _RETRY_BACKOFF_BASE * (2 ** attempt))
-                )
+                # Riot may send a numeric delay (seconds) or an HTTP-date
+                # in the Retry-After header; fall back to exponential back-off
+                # when the header is absent or cannot be parsed as a number.
+                try:
+                    retry_after = float(resp.headers["Retry-After"])
+                except (KeyError, ValueError):
+                    retry_after = _RETRY_BACKOFF_BASE * (2 ** attempt)
                 logger.warning(
                     "Rate limited (429). Sleeping %.1fs (attempt %d/%d).",
                     retry_after, attempt + 1, _MAX_RETRIES,
@@ -303,9 +309,9 @@ def parse_match(match: dict, timeline: dict | None = None) -> dict:
         red_picks.sort(key=lambda x: x["draft_turn"] or _MISSING_DRAFT_TURN)
     else:
         for i, pick in enumerate(blue_picks):
-            pick["draft_turn"] = _BLUE_PICK_TURNS[i] if i < len(_BLUE_PICK_TURNS) else None
+            pick["draft_turn"] = _BLUE_PICK_TURNS[i] if i < len(_BLUE_PICK_TURNS) else _MISSING_DRAFT_TURN
         for i, pick in enumerate(red_picks):
-            pick["draft_turn"] = _RED_PICK_TURNS[i] if i < len(_RED_PICK_TURNS) else None
+            pick["draft_turn"] = _RED_PICK_TURNS[i] if i < len(_RED_PICK_TURNS) else _MISSING_DRAFT_TURN
 
     def _extract_bans(team_id: int) -> list[dict]:
         bans = teams.get(team_id, {}).get("bans", [])
