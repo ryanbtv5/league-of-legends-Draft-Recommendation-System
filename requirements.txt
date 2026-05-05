@@ -1,0 +1,40 @@
+# Core ML
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+xgboost>=2.0.0
+torch>=2.1.0
+
+# Data / API
+requests>=2.31.0
+aiohttp>=3.9.0
+
+# API serving
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.4.0
+
+# Experiment tracking
+mlflow>=2.8.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.13.0
+plotly>=5.17.0
+
+# Notebooks
+jupyter>=1.0.0
+ipykernel>=6.26.0
+
+# Utilities
+tqdm>=4.66.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+joblib>=1.3.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Code quality
+ruff>=0.1.0
