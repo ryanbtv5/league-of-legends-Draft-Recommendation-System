@@ -1,0 +1,70 @@
+# config.yaml — central project configuration
+
+project:
+  name: "lol-draft-recommendation"
+  version: "0.1.0"
+  random_seed: 42
+
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  external_dir: "data/external"
+  # Number of champions in the game (update as patches release)
+  num_champions: 165
+  # Standard draft positions
+  roles: ["TOP", "JUNGLE", "MID", "ADC", "SUPPORT"]
+  # Max picks + bans per side
+  picks_per_team: 5
+  bans_per_team: 5
+
+features:
+  embedding_dim: 64          # champion embedding size
+  use_role_encoding: true
+  use_synergy_matrix: true
+  use_counter_matrix: true
+
+model:
+  baseline:
+    type: "xgboost"
+    n_estimators: 300
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+  neural:
+    type: "mlp"
+    hidden_dims: [256, 128, 64]
+    dropout: 0.3
+    learning_rate: 0.001
+    batch_size: 512
+    epochs: 50
+  transformer:
+    type: "transformer"
+    d_model: 128
+    nhead: 4
+    num_layers: 3
+    dim_feedforward: 256
+    dropout: 0.1
+    learning_rate: 0.0003
+    batch_size: 256
+    epochs: 100
+
+training:
+  val_split: 0.15
+  test_split: 0.15
+  early_stopping_patience: 10
+  model_save_dir: "models"
+
+evaluation:
+  top_k: [1, 3, 5]           # top-k accuracy metrics
+  metrics: ["accuracy", "ndcg", "mrr"]
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  reload: false
+  log_level: "info"
+
+mlflow:
+  tracking_uri: "mlruns"
+  experiment_name: "draft-recommendation"
