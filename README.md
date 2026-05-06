@@ -103,6 +103,12 @@ python -m src.data.preprocess \
   --output data/processed/drafts.parquet
 ```
 
+You can also pass a JSONL file (e.g. Kaggle's `match_data.jsonl`) directly:
+
+```bash
+python -m src.data.preprocess --input data/raw/match_data.jsonl
+```
+
 ### 4. Train a model
 
 ```bash

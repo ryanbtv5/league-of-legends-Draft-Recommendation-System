@@ -34,6 +34,7 @@ and mapped to the standard interleave above.
 
 Usage (CLI):
     python -m src.data.preprocess --input data/raw --output data/processed/drafts.parquet
+    python -m src.data.preprocess --input data/raw/match_data.jsonl
 """
 
 from __future__ import annotations
@@ -155,6 +156,9 @@ def _extract_draft_states(match: dict[str, Any]) -> list[dict]:
         List of 10 dicts (one per draft turn), or empty list if the match
         does not have exactly 10 participants.
     """
+    if "info" not in match and isinstance(match.get("root"), dict):
+        match = match["root"]
+
     info = match.get("info", {})
     participants = info.get("participants", [])
     teams = {t["teamId"]: t for t in info.get("teams", [])}
@@ -179,7 +183,12 @@ def _extract_draft_states(match: dict[str, Any]) -> list[dict]:
     def _get_bans(team_id: int) -> list[int]:
         raw_bans = teams.get(team_id, {}).get("bans", [])
         sorted_bans = sorted(raw_bans, key=lambda b: b.get("pickTurn", 0))
-        ids = [b.get("championId", 0) for b in sorted_bans]
+        ids = []
+        for ban in sorted_bans:
+            champ_id = ban.get("championId", 0)
+            if champ_id is None or champ_id < 0:
+                champ_id = 0
+            ids.append(champ_id)
         while len(ids) < _BANS_PER_TEAM:
             ids.append(0)
         return ids[:_BANS_PER_TEAM]
@@ -224,7 +233,7 @@ def preprocess(
     input_dir: pathlib.Path = RAW_DIR,
     output_path: pathlib.Path = PROCESSED_DIR / "drafts.parquet",
 ) -> pd.DataFrame:
-    """Parse all raw JSON files in *input_dir* into an ML-ready draft-states DataFrame.
+    """Parse raw match JSON or JSONL data into an ML-ready draft-states DataFrame.
 
     Each match contributes **10 rows** — one per global pick turn — so that
     models can learn from every intermediate draft state, not just the final
@@ -235,34 +244,80 @@ def preprocess(
     (pipeline state files written by ``src/data/ingest``).
 
     Args:
-        input_dir:   Directory of raw Riot match JSON files.
+        input_dir:   Directory of raw Riot match JSON files or a .json/.jsonl file.
         output_path: Destination Parquet file.
 
     Returns:
         Processed :class:`pandas.DataFrame` with schema described in the
         module docstring.
     """
-    # Exclude pipeline-state files written by ingest.py
-    _skip_stems = {"_progress", "matches_structured"}
-    json_files = [
-        p for p in input_dir.glob("*.json") if p.stem not in _skip_stems
-    ]
-    if not json_files:
-        logger.warning("No JSON files found in %s", input_dir)
-        return pd.DataFrame()
-
     all_rows: list[dict] = []
     errors = 0
-    for fp in tqdm(json_files, desc="Parsing matches"):
-        try:
-            match = json.loads(fp.read_text())
-            rows = _extract_draft_states(match)
-            if not rows:
-                logger.debug("Skipped %s (unexpected participant count)", fp.name)
-            all_rows.extend(rows)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.debug("Error parsing %s: %s", fp.name, exc)
-            errors += 1
+
+    if input_dir.is_dir():
+        # Exclude pipeline-state files written by ingest.py
+        _skip_stems = {"_progress", "matches_structured"}
+        json_files = [
+            p for p in input_dir.glob("*.json") if p.stem not in _skip_stems
+        ]
+        if not json_files:
+            logger.warning("No JSON files found in %s", input_dir)
+            return pd.DataFrame()
+
+        for fp in tqdm(json_files, desc="Parsing matches"):
+            try:
+                match = json.loads(fp.read_text())
+                rows = _extract_draft_states(match)
+                if not rows:
+                    logger.debug("Skipped %s (unexpected participant count)", fp.name)
+                all_rows.extend(rows)
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.debug("Error parsing %s: %s", fp.name, exc)
+                errors += 1
+    elif input_dir.is_file():
+        if input_dir.suffix.lower() == ".jsonl":
+            with input_dir.open("r", encoding="utf-8") as handle:
+                for line_no, line in tqdm(
+                    enumerate(handle, start=1),
+                    desc=f"Parsing {input_dir.name}",
+                ):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        match = json.loads(line)
+                        rows = _extract_draft_states(match)
+                        if not rows:
+                            logger.debug(
+                                "Skipped %s line %d (unexpected participant count)",
+                                input_dir.name,
+                                line_no,
+                            )
+                        all_rows.extend(rows)
+                    except json.JSONDecodeError as exc:
+                        logger.debug(
+                            "Error parsing %s line %d: %s",
+                            input_dir.name,
+                            line_no,
+                            exc,
+                        )
+                        errors += 1
+        else:
+            try:
+                match = json.loads(input_dir.read_text())
+                rows = _extract_draft_states(match)
+                if not rows:
+                    logger.debug(
+                        "Skipped %s (unexpected participant count)",
+                        input_dir.name,
+                    )
+                all_rows.extend(rows)
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning("Error parsing %s: %s", input_dir, exc)
+                return pd.DataFrame()
+    else:
+        logger.warning("Input path does not exist: %s", input_dir)
+        return pd.DataFrame()
 
     if errors:
         logger.warning("%d files could not be parsed", errors)
