@@ -285,8 +285,6 @@ def _safe_divide(values: np.ndarray, denom: int) -> np.ndarray:
 
 def _blue_win_probabilities(model: RandomForestClassifier, features: np.ndarray) -> np.ndarray:
     probs = model.predict_proba(features)
-    if probs.ndim == 1:
-        return probs.astype(np.float32)
     if hasattr(model, "classes_"):
         classes = list(model.classes_)
         if 1 in classes:
