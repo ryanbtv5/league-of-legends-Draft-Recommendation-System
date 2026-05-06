@@ -225,7 +225,8 @@ class DraftInteractionEncoder:
 
     def encode_ids(self, champion_ids: Sequence[int], pad_to: int | None = None) -> np.ndarray:
         """Encode champion IDs into dense indices for embedding models."""
-        idxs = np.array(self.enc.encode_many(champion_ids), dtype=np.int64)
+        filtered = self._filtered_ids(champion_ids)
+        idxs = np.array(self.enc.encode_many(filtered), dtype=np.int64)
         if pad_to is None:
             return idxs
         if len(idxs) >= pad_to:
@@ -246,6 +247,7 @@ class DraftInteractionEncoder:
         if idxs.size < 2 or self.synergy.size == 0:
             return 0.0, 0.0, 0.0
         sub = self.synergy[np.ix_(idxs, idxs)]
+        # Use k=1 to ignore diagonal self-pairs already zeroed in __init__.
         tri = sub[np.triu_indices(len(idxs), k=1)]
         if tri.size == 0:
             return 0.0, 0.0, 0.0
