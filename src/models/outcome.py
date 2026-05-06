@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import matplotlib
 import numpy as np
@@ -220,6 +220,196 @@ def evaluate_model(
     auc = roc_auc_score(y_test, probs)
     acc = accuracy_score(y_test, model.predict(X_test))
     return float(auc), float(acc)
+
+
+def _as_index_array(encoder: ChampionEncoder, champion_ids: Sequence[int]) -> np.ndarray:
+    filtered = [cid for cid in champion_ids if cid != 0]
+    if not filtered:
+        return np.array([], dtype=np.int64)
+    idxs = np.array([encoder.encode(cid) for cid in filtered], dtype=np.int64)
+    if idxs.size == 0:
+        return np.array([], dtype=np.int64)
+    return np.unique(idxs)
+
+
+def _within_team_sum_max(idxs: np.ndarray, matrix: np.ndarray) -> tuple[float, float]:
+    if idxs.size < 2:
+        return 0.0, 0.0
+    sub = matrix[np.ix_(idxs, idxs)]
+    tri = sub[np.triu_indices(len(idxs), k=1)]
+    if tri.size == 0:
+        return 0.0, 0.0
+    return float(tri.sum()), float(tri.max())
+
+
+def _cross_team_sum_max(left: np.ndarray, right: np.ndarray, matrix: np.ndarray) -> tuple[float, float]:
+    if left.size == 0 or right.size == 0:
+        return 0.0, 0.0
+    sub = matrix[np.ix_(left, right)]
+    return float(sub.sum()), float(sub.max())
+
+
+def _pair_additions_left(
+    matrix: np.ndarray,
+    candidate_idxs: np.ndarray,
+    fixed_right: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    if candidate_idxs.size == 0:
+        return np.array([], dtype=np.float32), np.array([], dtype=np.float32)
+    if fixed_right.size == 0:
+        zeros = np.zeros(candidate_idxs.size, dtype=np.float32)
+        return zeros, zeros
+    sub = matrix[np.ix_(candidate_idxs, fixed_right)]
+    return sub.sum(axis=1).astype(np.float32), sub.max(axis=1).astype(np.float32)
+
+
+def _pair_additions_right(
+    matrix: np.ndarray,
+    fixed_left: np.ndarray,
+    candidate_idxs: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    if candidate_idxs.size == 0:
+        return np.array([], dtype=np.float32), np.array([], dtype=np.float32)
+    if fixed_left.size == 0:
+        zeros = np.zeros(candidate_idxs.size, dtype=np.float32)
+        return zeros, zeros
+    sub = matrix[np.ix_(fixed_left, candidate_idxs)]
+    return sub.sum(axis=0).astype(np.float32), sub.max(axis=0).astype(np.float32)
+
+
+def _safe_divide(values: np.ndarray, denom: int) -> np.ndarray:
+    if denom <= 0:
+        return np.zeros_like(values, dtype=np.float32)
+    return (values / float(denom)).astype(np.float32)
+
+
+def _blue_win_probabilities(model: RandomForestClassifier, features: np.ndarray) -> np.ndarray:
+    probs = model.predict_proba(features)
+    if probs.ndim == 1:
+        return probs.astype(np.float32)
+    if hasattr(model, "classes_"):
+        classes = list(model.classes_)
+        if 1 in classes:
+            return probs[:, classes.index(1)].astype(np.float32)
+    if probs.shape[1] > 1:
+        return probs[:, 1].astype(np.float32)
+    return probs[:, 0].astype(np.float32)
+
+
+def recommend_champions(
+    model: RandomForestClassifier,
+    encoder: DraftInteractionEncoder,
+    *,
+    blue_picks: Sequence[int],
+    red_picks: Sequence[int],
+    blue_bans: Sequence[int],
+    red_bans: Sequence[int],
+    team: str,
+    top_k: int = 5,
+    candidate_ids: Sequence[int] | None = None,
+) -> list[tuple[int, float]]:
+    """Recommend champions that maximize win probability for the given team."""
+    if team not in {"blue", "red"}:
+        raise ValueError("team must be 'blue' or 'red'")
+
+    excluded_ids = set(blue_picks) | set(red_picks) | set(blue_bans) | set(red_bans) | {0}
+    if candidate_ids is None:
+        champion_ids = [encoder.enc.decode(i) for i in range(encoder.n)]
+        candidate_ids = [cid for cid in champion_ids if cid not in excluded_ids and cid != -1]
+    else:
+        candidate_ids = [cid for cid in candidate_ids if cid not in excluded_ids]
+    candidate_ids = list(dict.fromkeys(candidate_ids))
+
+    if not candidate_ids:
+        return []
+
+    candidate_idxs = np.array([encoder.enc.encode(cid) for cid in candidate_ids], dtype=np.int64)
+
+    blue_vec = encoder.team_vector(blue_picks)
+    red_vec = encoder.team_vector(red_picks)
+    blue_ban_vec = encoder.team_vector(blue_bans)
+    red_ban_vec = encoder.team_vector(red_bans)
+
+    base_vec = np.concatenate([blue_vec, red_vec, blue_ban_vec, red_ban_vec]).astype(np.float32)
+    features = np.repeat(base_vec[None, :], candidate_idxs.size, axis=0)
+    offset = 0 if team == "blue" else encoder.n
+    features[np.arange(candidate_idxs.size), offset + candidate_idxs] = 1.0
+
+    blue_idxs = _as_index_array(encoder.enc, blue_picks)
+    red_idxs = _as_index_array(encoder.enc, red_picks)
+
+    base_blue_sum, base_blue_max = _within_team_sum_max(blue_idxs, encoder.synergy)
+    base_red_sum, base_red_max = _within_team_sum_max(red_idxs, encoder.synergy)
+    base_bvr_sum, base_bvr_max = _cross_team_sum_max(blue_idxs, red_idxs, encoder.counter)
+    base_rvb_sum, base_rvb_max = _cross_team_sum_max(red_idxs, blue_idxs, encoder.counter)
+
+    blue_pair_count = int(len(blue_idxs) * (len(blue_idxs) - 1) / 2)
+    red_pair_count = int(len(red_idxs) * (len(red_idxs) - 1) / 2)
+    cross_pair_count = int(len(blue_idxs) * len(red_idxs))
+
+    if team == "blue":
+        blue_add_sum, blue_add_max = _pair_additions_left(encoder.synergy, candidate_idxs, blue_idxs)
+        blue_sum = base_blue_sum + blue_add_sum
+        blue_mean = _safe_divide(blue_sum, blue_pair_count + len(blue_idxs))
+        blue_max = np.maximum(base_blue_max, blue_add_max)
+
+        red_sum = np.full(candidate_idxs.size, base_red_sum, dtype=np.float32)
+        red_mean = _safe_divide(red_sum, red_pair_count)
+        red_max = np.full(candidate_idxs.size, base_red_max, dtype=np.float32)
+
+        bvr_add_sum, bvr_add_max = _pair_additions_left(encoder.counter, candidate_idxs, red_idxs)
+        bvr_sum = base_bvr_sum + bvr_add_sum
+        bvr_mean = _safe_divide(bvr_sum, cross_pair_count + len(red_idxs))
+        bvr_max = np.maximum(base_bvr_max, bvr_add_max)
+
+        rvb_add_sum, rvb_add_max = _pair_additions_right(encoder.counter, red_idxs, candidate_idxs)
+        rvb_sum = base_rvb_sum + rvb_add_sum
+        rvb_mean = _safe_divide(rvb_sum, cross_pair_count + len(red_idxs))
+        rvb_max = np.maximum(base_rvb_max, rvb_add_max)
+    else:
+        blue_sum = np.full(candidate_idxs.size, base_blue_sum, dtype=np.float32)
+        blue_mean = _safe_divide(blue_sum, blue_pair_count)
+        blue_max = np.full(candidate_idxs.size, base_blue_max, dtype=np.float32)
+
+        red_add_sum, red_add_max = _pair_additions_left(encoder.synergy, candidate_idxs, red_idxs)
+        red_sum = base_red_sum + red_add_sum
+        red_mean = _safe_divide(red_sum, red_pair_count + len(red_idxs))
+        red_max = np.maximum(base_red_max, red_add_max)
+
+        bvr_add_sum, bvr_add_max = _pair_additions_right(encoder.counter, blue_idxs, candidate_idxs)
+        bvr_sum = base_bvr_sum + bvr_add_sum
+        bvr_mean = _safe_divide(bvr_sum, cross_pair_count + len(blue_idxs))
+        bvr_max = np.maximum(base_bvr_max, bvr_add_max)
+
+        rvb_add_sum, rvb_add_max = _pair_additions_left(encoder.counter, candidate_idxs, blue_idxs)
+        rvb_sum = base_rvb_sum + rvb_add_sum
+        rvb_mean = _safe_divide(rvb_sum, cross_pair_count + len(blue_idxs))
+        rvb_max = np.maximum(base_rvb_max, rvb_add_max)
+
+    interaction = np.column_stack(
+        [
+            blue_sum,
+            blue_mean,
+            blue_max,
+            red_sum,
+            red_mean,
+            red_max,
+            bvr_sum,
+            bvr_mean,
+            bvr_max,
+            rvb_sum,
+            rvb_mean,
+            rvb_max,
+        ]
+    ).astype(np.float32)
+
+    features = np.concatenate([features, interaction], axis=1)
+    blue_probs = _blue_win_probabilities(model, features)
+    win_probs = blue_probs if team == "blue" else 1.0 - blue_probs
+
+    top_k = min(top_k, len(candidate_ids))
+    order = np.argsort(win_probs)[::-1][:top_k]
+    return [(int(candidate_ids[i]), float(win_probs[i])) for i in order]
 
 
 def run_training(
