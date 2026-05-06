@@ -156,6 +156,7 @@ def _extract_draft_states(match: dict[str, Any]) -> list[dict]:
         List of 10 dicts (one per draft turn), or empty list if the match
         does not have exactly 10 participants.
     """
+    # Some exports (e.g., Kaggle JSONL snapshots) wrap match data under "root".
     if "info" not in match and isinstance(match.get("root"), dict):
         match = match["root"]
 
@@ -277,6 +278,7 @@ def preprocess(
     elif input_dir.is_file():
         if input_dir.suffix.lower() == ".jsonl":
             with input_dir.open("r", encoding="utf-8") as handle:
+                # Avoid pre-counting lines to keep single-pass parsing for large JSONL files.
                 for line_no, line in tqdm(
                     enumerate(handle, start=1),
                     desc=f"Parsing {input_dir.name}",
