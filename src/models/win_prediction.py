@@ -35,7 +35,8 @@ class AttentionPool(nn.Module):
     def forward(self, embs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Return a pooled representation from (B, S, D) embeddings."""
         d_model = embs.size(-1)
-        scores = (embs * self.query).sum(dim=-1) / (d_model**0.5)
+        query = self.query.squeeze(0).squeeze(0)
+        scores = torch.matmul(embs, query) / (d_model**0.5)
         scores = scores.masked_fill(mask, -1e9)
         weights = torch.softmax(scores, dim=-1)
         weights = self.dropout(weights)
