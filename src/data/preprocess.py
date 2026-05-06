@@ -278,9 +278,11 @@ def preprocess(
     elif input_dir.is_file():
         if input_dir.suffix.lower() == ".jsonl":
             with input_dir.open("r", encoding="utf-8") as handle:
-                # Avoid pre-counting lines to keep single-pass parsing for large JSONL files.
+                total_lines = sum(1 for _ in handle)
+                handle.seek(0)
                 for line_no, line in tqdm(
                     enumerate(handle, start=1),
+                    total=total_lines,
                     desc=f"Parsing {input_dir.name}",
                 ):
                     line = line.strip()
@@ -322,7 +324,7 @@ def preprocess(
         return pd.DataFrame()
 
     if errors:
-        logger.warning("%d files could not be parsed", errors)
+        logger.warning("%d items could not be parsed", errors)
 
     df = pd.DataFrame(all_rows)
     if not df.empty:
