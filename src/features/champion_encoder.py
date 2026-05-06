@@ -169,3 +169,152 @@ class DraftStateEncoder:
             ],
             axis=0,
         )
+
+
+class DraftInteractionEncoder:
+    """Encode draft state with team vectors and champion interaction features.
+
+    The output concatenates:
+      1. Multi-hot vector of blue picks (``num_champions`` dims)
+      2. Multi-hot vector of red picks  (``num_champions`` dims)
+      3. Multi-hot vector of blue bans  (``num_champions`` dims)
+      4. Multi-hot vector of red bans   (``num_champions`` dims)
+      5. Interaction features (12 dims):
+         - blue synergy: sum/mean/max
+         - red synergy:  sum/mean/max
+         - blue vs red counters: sum/mean/max
+         - red vs blue counters: sum/mean/max
+
+    ``encode_ids`` is provided for models that consume dense champion indices
+    directly (e.g., embedding or sequence models).
+    """
+
+    def __init__(
+        self,
+        champion_encoder: ChampionEncoder,
+        synergy_matrix: np.ndarray | None = None,
+        counter_matrix: np.ndarray | None = None,
+    ) -> None:
+        self.enc = champion_encoder
+        self.n = champion_encoder.num_champions
+        self.synergy = self._init_matrix(synergy_matrix, "synergy")
+        self.counter = self._init_matrix(counter_matrix, "counter")
+        # Champions cannot synergize or counter themselves, so we drop self-pairs.
+        np.fill_diagonal(self.synergy, 0.0)
+        np.fill_diagonal(self.counter, 0.0)
+        self.feature_dim = 4 * self.n + 12
+
+    @staticmethod
+    def _filtered_ids(champion_ids: Sequence[int]) -> list[int]:
+        return [cid for cid in champion_ids if cid != 0]
+
+    def _init_matrix(self, matrix: np.ndarray | None, name: str) -> np.ndarray:
+        if matrix is None:
+            return np.zeros((self.n, self.n), dtype=np.float32)
+        if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+            raise ValueError(f"{name} matrix must be square, got shape {matrix.shape}")
+        if matrix.shape != (self.n, self.n):
+            raise ValueError(f"{name} matrix shape must be ({self.n}, {self.n}), got {matrix.shape}")
+        return matrix.astype(np.float32, copy=False)
+
+    def _as_indices(self, champion_ids: Sequence[int]) -> np.ndarray:
+        idxs = [self.enc.encode(cid) for cid in self._filtered_ids(champion_ids)]
+        if not idxs:
+            return np.array([], dtype=np.int64)
+        return np.unique(np.array(idxs, dtype=np.int64))
+
+    def encode_ids(self, champion_ids: Sequence[int], pad_to: int | None = None) -> np.ndarray:
+        """Encode champion IDs into dense indices for embedding models."""
+        filtered = self._filtered_ids(champion_ids)
+        idxs = np.array(self.enc.encode_many(filtered), dtype=np.int64)
+        if pad_to is None:
+            return idxs
+        if len(idxs) >= pad_to:
+            return idxs[:pad_to]
+        padded = np.zeros(pad_to, dtype=np.int64)
+        padded[: len(idxs)] = idxs
+        return padded
+
+    def team_vector(self, champion_ids: Sequence[int]) -> np.ndarray:
+        """Create a multi-hot team vector from champion IDs (0 = empty)."""
+        vec = np.zeros(self.n, dtype=np.float32)
+        for cid in self._filtered_ids(champion_ids):
+            idx = self.enc.encode(cid)
+            vec[idx] = 1.0
+        return vec
+
+    def _within_team_stats(self, idxs: np.ndarray) -> tuple[float, float, float]:
+        if idxs.size < 2 or self.synergy.size == 0:
+            return 0.0, 0.0, 0.0
+        sub = self.synergy[np.ix_(idxs, idxs)]
+        # Use k=1 to ignore diagonal self-pairs already zeroed in __init__.
+        tri = sub[np.triu_indices(len(idxs), k=1)]
+        if tri.size == 0:
+            return 0.0, 0.0, 0.0
+        total = float(tri.sum())
+        return total, total / tri.size, float(tri.max())
+
+    def _cross_team_stats(self, left: np.ndarray, right: np.ndarray) -> tuple[float, float, float]:
+        if left.size == 0 or right.size == 0 or self.counter.size == 0:
+            return 0.0, 0.0, 0.0
+        sub = self.counter[np.ix_(left, right)]
+        total = float(sub.sum())
+        return total, total / sub.size, float(sub.max())
+
+    def interaction_features(self, blue_picks: Sequence[int], red_picks: Sequence[int]) -> np.ndarray:
+        """Compute synergy/counter interaction features for current teams."""
+        blue_idxs = self._as_indices(blue_picks)
+        red_idxs = self._as_indices(red_picks)
+
+        blue_sum, blue_mean, blue_max = self._within_team_stats(blue_idxs)
+        red_sum, red_mean, red_max = self._within_team_stats(red_idxs)
+        bvr_sum, bvr_mean, bvr_max = self._cross_team_stats(blue_idxs, red_idxs)
+        rvb_sum, rvb_mean, rvb_max = self._cross_team_stats(red_idxs, blue_idxs)
+
+        return np.array(
+            [
+                blue_sum,
+                blue_mean,
+                blue_max,
+                red_sum,
+                red_mean,
+                red_max,
+                bvr_sum,
+                bvr_mean,
+                bvr_max,
+                rvb_sum,
+                rvb_mean,
+                rvb_max,
+            ],
+            dtype=np.float32,
+        )
+
+    def encode(
+        self,
+        blue_picks: Sequence[int],
+        red_picks: Sequence[int],
+        blue_bans: Sequence[int],
+        red_bans: Sequence[int],
+    ) -> np.ndarray:
+        """Build the draft feature vector for a single state."""
+        return np.concatenate(
+            [
+                self.team_vector(blue_picks),
+                self.team_vector(red_picks),
+                self.team_vector(blue_bans),
+                self.team_vector(red_bans),
+                self.interaction_features(blue_picks, red_picks),
+            ]
+        )
+
+    def encode_batch(self, rows: list[dict]) -> np.ndarray:
+        """Encode a list of draft-event dicts into a 2-D array."""
+        features = np.zeros((len(rows), self.feature_dim), dtype=np.float32)
+        for i, row in enumerate(rows):
+            features[i] = self.encode(
+                blue_picks=row.get("blue_picks_so_far", []),
+                red_picks=row.get("red_picks_so_far", []),
+                blue_bans=row.get("blue_bans", []),
+                red_bans=row.get("red_bans", []),
+            )
+        return features
