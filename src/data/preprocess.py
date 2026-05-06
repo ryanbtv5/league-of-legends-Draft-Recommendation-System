@@ -187,7 +187,10 @@ def _extract_draft_states(match: dict[str, Any]) -> list[dict]:
         ids = []
         for ban in sorted_bans:
             champ_id = ban.get("championId", 0)
-            if champ_id is None or champ_id < 0:
+            if champ_id is None:
+                champ_id = 0
+            elif champ_id < 0:
+                # Some datasets use -1 to represent "no ban".
                 champ_id = 0
             ids.append(champ_id)
         while len(ids) < _BANS_PER_TEAM:
@@ -278,11 +281,9 @@ def preprocess(
     elif input_dir.is_file():
         if input_dir.suffix.lower() == ".jsonl":
             with input_dir.open("r", encoding="utf-8") as handle:
-                total_lines = sum(1 for _ in handle)
-                handle.seek(0)
+                # Avoid a second pass; progress shows processed lines only.
                 for line_no, line in tqdm(
                     enumerate(handle, start=1),
-                    total=total_lines,
                     desc=f"Parsing {input_dir.name}",
                 ):
                     line = line.strip()
