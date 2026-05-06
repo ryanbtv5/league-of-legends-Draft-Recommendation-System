@@ -201,7 +201,7 @@ class DraftInteractionEncoder:
 
     def _init_matrix(self, matrix: np.ndarray | None, name: str) -> np.ndarray:
         if matrix is None:
-            return np.zeros((0, 0), dtype=np.float32)
+            return np.zeros((self.n, self.n), dtype=np.float32)
         if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
             raise ValueError(f"{name} matrix must be square, got shape {matrix.shape}")
         if matrix.shape != (self.n, self.n):
