@@ -184,6 +184,9 @@ class DraftInteractionEncoder:
          - red synergy:  sum/mean/max
          - blue vs red counters: sum/mean/max
          - red vs blue counters: sum/mean/max
+
+    ``encode_ids`` is provided for models that consume dense champion indices
+    directly (e.g., embedding or sequence models).
     """
 
     def __init__(
@@ -196,6 +199,7 @@ class DraftInteractionEncoder:
         self.n = champion_encoder.num_champions
         self.synergy = self._init_matrix(synergy_matrix, "synergy")
         self.counter = self._init_matrix(counter_matrix, "counter")
+        # Champions cannot synergize with themselves, so we drop self-pairs.
         np.fill_diagonal(self.synergy, 0.0)
         self.feature_dim = 4 * self.n + 12
 
@@ -215,7 +219,7 @@ class DraftInteractionEncoder:
         return np.unique(np.array(idxs, dtype=np.int64))
 
     def encode_ids(self, champion_ids: Sequence[int], pad_to: int | None = None) -> np.ndarray:
-        """Encode champion IDs into dense indices, optionally padding."""
+        """Encode champion IDs into dense indices for embedding models."""
         idxs = np.array(self.enc.encode_many(champion_ids), dtype=np.int64)
         if pad_to is None:
             return idxs
