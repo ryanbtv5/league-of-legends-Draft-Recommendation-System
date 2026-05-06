@@ -29,14 +29,16 @@ class AttentionPool(nn.Module):
 
     def __init__(self, embedding_dim: int, dropout: float = 0.0) -> None:
         super().__init__()
-        self.query = nn.Parameter(torch.randn(1, 1, embedding_dim))
+        self.query = nn.Parameter(torch.empty(1, 1, embedding_dim))
         self.dropout = nn.Dropout(dropout)
         self.scale = 1.0 / (embedding_dim**0.5)
+        nn.init.xavier_uniform_(self.query)
 
     def forward(self, embs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Return a pooled representation from (B, S, D) embeddings."""
         query = self.query.expand(embs.size(0), -1, -1)
-        scores = torch.matmul(embs, query.transpose(-2, -1)).squeeze(-1) * self.scale
+        scaled_query = query * self.scale
+        scores = torch.matmul(embs, scaled_query.transpose(-2, -1)).squeeze(-1)
         scores = scores.masked_fill(mask, torch.finfo(scores.dtype).min)
         weights = torch.softmax(scores, dim=-1)
         weights = self.dropout(weights)
