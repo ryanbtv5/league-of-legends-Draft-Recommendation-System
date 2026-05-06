@@ -199,9 +199,14 @@ class DraftInteractionEncoder:
         self.n = champion_encoder.num_champions
         self.synergy = self._init_matrix(synergy_matrix, "synergy")
         self.counter = self._init_matrix(counter_matrix, "counter")
-        # Champions cannot synergize with themselves, so we drop self-pairs.
+        # Champions cannot synergize or counter themselves, so we drop self-pairs.
         np.fill_diagonal(self.synergy, 0.0)
+        np.fill_diagonal(self.counter, 0.0)
         self.feature_dim = 4 * self.n + 12
+
+    @staticmethod
+    def _filtered_ids(champion_ids: Sequence[int]) -> list[int]:
+        return [cid for cid in champion_ids if cid != 0]
 
     def _init_matrix(self, matrix: np.ndarray | None, name: str) -> np.ndarray:
         if matrix is None:
@@ -213,7 +218,7 @@ class DraftInteractionEncoder:
         return matrix.astype(np.float32, copy=False)
 
     def _as_indices(self, champion_ids: Sequence[int]) -> np.ndarray:
-        idxs = [self.enc.encode(cid) for cid in champion_ids if cid != 0]
+        idxs = [self.enc.encode(cid) for cid in self._filtered_ids(champion_ids)]
         if not idxs:
             return np.array([], dtype=np.int64)
         return np.unique(np.array(idxs, dtype=np.int64))
@@ -232,9 +237,7 @@ class DraftInteractionEncoder:
     def team_vector(self, champion_ids: Sequence[int]) -> np.ndarray:
         """Create a multi-hot team vector from champion IDs (0 = empty)."""
         vec = np.zeros(self.n, dtype=np.float32)
-        for cid in champion_ids:
-            if cid == 0:
-                continue
+        for cid in self._filtered_ids(champion_ids):
             idx = self.enc.encode(cid)
             vec[idx] = 1.0
         return vec
