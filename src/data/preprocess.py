@@ -232,8 +232,10 @@ def _extract_draft_states(match: dict[str, Any]) -> list[dict]:
 
 
 def preprocess(
-    input_dir: pathlib.Path = RAW_DIR,
+    input_path: pathlib.Path | None = None,
     output_path: pathlib.Path = PROCESSED_DIR / "drafts.parquet",
+    *,
+    input_dir: pathlib.Path | None = None,
 ) -> pd.DataFrame:
     """Parse raw match JSON or JSONL data into an ML-ready draft-states DataFrame.
 
@@ -246,24 +248,30 @@ def preprocess(
     (pipeline state files written by ``src/data/ingest``).
 
     Args:
-        input_dir:   Directory of raw Riot match JSON files or a .json/.jsonl file.
+        input_path: Directory of raw Riot match JSON files or a .json/.jsonl file.
         output_path: Destination Parquet file.
+        input_dir: Deprecated alias for ``input_path``.
 
     Returns:
         Processed :class:`pandas.DataFrame` with schema described in the
         module docstring.
     """
+    if input_path is None:
+        input_path = input_dir if input_dir is not None else RAW_DIR
+    elif input_dir is not None:
+        raise ValueError("Provide only input_path or input_dir, not both.")
+
     all_rows: list[dict] = []
     errors = 0
 
-    if input_dir.is_dir():
+    if input_path.is_dir():
         # Exclude pipeline-state files written by ingest.py
         _skip_stems = {"_progress", "matches_structured"}
         json_files = [
-            p for p in input_dir.glob("*.json") if p.stem not in _skip_stems
+            p for p in input_path.glob("*.json") if p.stem not in _skip_stems
         ]
         if not json_files:
-            logger.warning("No JSON files found in %s", input_dir)
+            logger.warning("No JSON files found in %s", input_path)
             return pd.DataFrame()
 
         for fp in tqdm(json_files, desc="Parsing matches"):
@@ -276,17 +284,17 @@ def preprocess(
             except (json.JSONDecodeError, OSError) as exc:
                 logger.debug("Error parsing %s: %s", fp.name, exc)
                 errors += 1
-    elif input_dir.is_file():
-        if input_dir.suffix.lower() == ".jsonl":
-            file_size = input_dir.stat().st_size
-            with input_dir.open("r", encoding="utf-8") as handle, tqdm(
+    elif input_path.is_file():
+        if input_path.suffix.lower() == ".jsonl":
+            file_size = input_path.stat().st_size
+            with input_path.open("r", encoding="utf-8") as handle, tqdm(
                 total=file_size,
-                desc=f"Parsing {input_dir.name}",
+                desc=f"Parsing {input_path.name}",
                 unit="B",
                 unit_scale=True,
             ) as progress:
                 for line_no, line in enumerate(handle, start=1):
-                    progress.update(len(line))
+                    progress.update(len(line.encode("utf-8")))
                     line = line.strip()
                     if not line:
                         continue
@@ -296,33 +304,33 @@ def preprocess(
                         if not rows:
                             logger.debug(
                                 "Skipped %s line %d (unexpected participant count)",
-                                input_dir.name,
+                                input_path.name,
                                 line_no,
                             )
                         all_rows.extend(rows)
                     except json.JSONDecodeError as exc:
                         logger.debug(
                             "Error parsing %s line %d: %s",
-                            input_dir.name,
+                            input_path.name,
                             line_no,
                             exc,
                         )
                         errors += 1
         else:
             try:
-                match = json.loads(input_dir.read_text())
+                match = json.loads(input_path.read_text())
                 rows = _extract_draft_states(match)
                 if not rows:
                     logger.debug(
                         "Skipped %s (unexpected participant count)",
-                        input_dir.name,
+                        input_path.name,
                     )
                 all_rows.extend(rows)
             except (json.JSONDecodeError, OSError) as exc:
-                logger.warning("Error parsing %s: %s", input_dir, exc)
+                logger.warning("Error parsing %s: %s", input_path, exc)
                 return pd.DataFrame()
     else:
-        logger.warning("Input path does not exist: %s", input_dir)
+        logger.warning("Input path does not exist: %s", input_path)
         return pd.DataFrame()
 
     if errors:
@@ -379,6 +387,6 @@ def _parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = _parse_args()
     preprocess(
-        input_dir=pathlib.Path(args.input),
+        input_path=pathlib.Path(args.input),
         output_path=pathlib.Path(args.output),
     )
