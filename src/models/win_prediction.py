@@ -1,20 +1,21 @@
 """
 src/models/win_prediction.py
 ----------------------------
-PyTorch win-probability model using champion embeddings.
+Transformer-based win-probability model that treats the draft as a sequence.
 
-Architecture:
-  1. Shared champion embedding table
-  2. Self-attention per team to capture synergy within picks/bans
-  3. Cross-attention between teams to capture counter interactions
-  4. Attention pooling to build team representations
-  5. Classifier head predicting blue win probability
+ Draft order (standard pick/ban phases):
+  Ban phase 1:  B1, R1, B2, R2, B3, R3
+  Pick phase 1: B1, R1, R2, B2, B3, R3
+  Ban phase 2:  R4, B4, R5, B5
+  Pick phase 2: R4, B4, B5, R5
+
+Tokens are champion indices with 0 reserved for padding. Use the helper
+``build_sequence`` to interleave team picks/bans into the ordered sequence.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Sequence
 
 import torch
 import torch.nn as nn
@@ -22,172 +23,152 @@ import torch.nn as nn
 from src.utils.config import get
 
 NUM_CHAMPIONS: int = get("data.num_champions", 165)
-EMB_DIM: int = get("features.embedding_dim", 64)
+D_MODEL: int = get("model.transformer.d_model", 128)
+NHEAD: int = get("model.transformer.nhead", 4)
+NUM_LAYERS: int = get("model.transformer.num_layers", 3)
+DIM_FF: int = get("model.transformer.dim_feedforward", 256)
+DROPOUT: float = get("model.transformer.dropout", 0.1)
+MAX_SEQ_LEN: int = 20
+
+DRAFT_ORDER: list[tuple[str, str, int]] = [
+    ("ban", "blue", 0),
+    ("ban", "red", 0),
+    ("ban", "blue", 1),
+    ("ban", "red", 1),
+    ("ban", "blue", 2),
+    ("ban", "red", 2),
+    ("pick", "blue", 0),
+    ("pick", "red", 0),
+    ("pick", "red", 1),
+    ("pick", "blue", 1),
+    ("pick", "blue", 2),
+    ("pick", "red", 2),
+    ("ban", "red", 3),
+    ("ban", "blue", 3),
+    ("ban", "red", 4),
+    ("ban", "blue", 4),
+    ("pick", "red", 3),
+    ("pick", "blue", 3),
+    ("pick", "blue", 4),
+    ("pick", "red", 4),
+]
 
 
-class AttentionPool(nn.Module):
-    """Learned attention pooling over a variable-length sequence."""
-
-    def __init__(self, embedding_dim: int, dropout: float = 0.0) -> None:
-        super().__init__()
-        self.query = nn.Parameter(torch.empty(1, 1, embedding_dim))
-        self.dropout = nn.Dropout(dropout)
-        self.scale = 1.0 / math.sqrt(embedding_dim)
-        nn.init.xavier_uniform_(self.query)
-
-    def forward(self, embs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """Return a pooled representation from (B, S, D) embeddings."""
-        query = self.query.expand(embs.size(0), -1, -1)
-        scaled_query = query * self.scale
-        scores = torch.matmul(embs, scaled_query.transpose(-2, -1)).squeeze(-1)
-        scores = scores.masked_fill(mask, -1e9)
-        weights = torch.softmax(scores, dim=-1)
-        weights = self.dropout(weights)
-        return torch.bmm(weights.unsqueeze(1), embs).squeeze(1)
+def _ensure_2d(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.dim() == 1:
+        return tensor.unsqueeze(0)
+    return tensor
 
 
 class DraftWinPredictor(nn.Module):
-    """Predict match win probability from a partial draft state.
-
-    Args:
-        num_champions: Champion vocabulary size.
-        embedding_dim: Dimension of champion embeddings.
-        team_hidden_dim: Hidden size for team representations.
-        head_hidden_dims: Hidden sizes for the classifier head.
-        dropout: Dropout probability for hidden layers.
-    """
+    """Predict blue win probability from a draft sequence."""
 
     def __init__(
         self,
         num_champions: int = NUM_CHAMPIONS,
-        embedding_dim: int = EMB_DIM,
-        team_hidden_dim: int | None = None,
-        head_hidden_dims: Sequence[int] | None = None,
-        num_heads: int = 4,
-        dropout: float = 0.2,
+        d_model: int = D_MODEL,
+        nhead: int = NHEAD,
+        num_layers: int = NUM_LAYERS,
+        dim_feedforward: int = DIM_FF,
+        dropout: float = DROPOUT,
+        max_seq_len: int = MAX_SEQ_LEN,
     ) -> None:
         super().__init__()
         self.num_champions = num_champions
-        self.embedding_dim = embedding_dim
-        team_hidden_dim = team_hidden_dim or embedding_dim
-        head_hidden_dims = list(head_hidden_dims or [128, 64])
+        self.d_model = d_model
+        self.max_seq_len = max_seq_len
 
-        self.champion_emb = nn.Embedding(
-            num_embeddings=num_champions + 1,
-            embedding_dim=embedding_dim,
-            padding_idx=0,
-        )
+        self.token_emb = nn.Embedding(num_champions + 1, d_model, padding_idx=0)
+        self.pos_emb = nn.Embedding(max_seq_len, d_model)
+        self.dropout = nn.Dropout(dropout)
 
-        self.self_attention = nn.MultiheadAttention(
-            embedding_dim=embedding_dim,
-            num_heads=num_heads,
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
             dropout=dropout,
             batch_first=True,
+            norm_first=True,
         )
-        self.cross_attention = nn.MultiheadAttention(
-            embedding_dim=embedding_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.pool = AttentionPool(embedding_dim, dropout=dropout)
-
-        self.team_encoder = nn.Sequential(
-            nn.Linear(2 * embedding_dim, team_hidden_dim),
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
+            nn.Linear(d_model, 1),
         )
+        self._init_weights()
 
-        head_layers: list[nn.Module] = []
-        prev = 2 * team_hidden_dim
-        for hidden in head_hidden_dims:
-            head_layers.extend(
-                [
-                    nn.Linear(prev, hidden),
-                    nn.ReLU(inplace=True),
-                    nn.Dropout(dropout),
-                ]
-            )
-            prev = hidden
-        head_layers.append(nn.Linear(prev, 1))
-        self.head = nn.Sequential(*head_layers)
+    def _init_weights(self) -> None:
+        nn.init.normal_(self.token_emb.weight, std=0.02)
+        nn.init.normal_(self.pos_emb.weight, std=0.02)
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
 
-    def _encode_team(self, picks: torch.Tensor, bans: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        tokens = torch.cat([picks, bans], dim=1)
-        mask = tokens == 0
-        return self.champion_emb(tokens), mask
-
-    def _attend(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        key_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        attended, _ = self.cross_attention(
-            query=query,
-            key=key,
-            value=value,
-            key_padding_mask=key_mask,
-            need_weights=False,
-        )
-        return attended
-
-    def _team_representation(
-        self,
-        self_context: torch.Tensor,
-        cross_context: torch.Tensor,
-        mask: torch.Tensor,
-    ) -> torch.Tensor:
-        self_context = self_context.masked_fill(mask.unsqueeze(-1), 0.0)
-        cross_context = cross_context.masked_fill(mask.unsqueeze(-1), 0.0)
-        synergy = self.pool(self_context, mask)
-        counters = self.pool(cross_context, mask)
-        return self.team_encoder(torch.cat([synergy, counters], dim=-1))
-
-    def forward(
-        self,
+    @staticmethod
+    def build_sequence(
         blue_picks: torch.Tensor,
         red_picks: torch.Tensor,
         blue_bans: torch.Tensor,
         red_bans: torch.Tensor,
+        *,
+        offset_tokens: bool = True,
     ) -> torch.Tensor:
-        """Return win logits for the blue team."""
-        blue_embs, blue_mask = self._encode_team(blue_picks, blue_bans)
-        red_embs, red_mask = self._encode_team(red_picks, red_bans)
+        """Interleave pick/ban tensors into draft order.
 
-        blue_self, _ = self.self_attention(
-            query=blue_embs,
-            key=blue_embs,
-            value=blue_embs,
-            key_padding_mask=blue_mask,
-            need_weights=False,
-        )
-        red_self, _ = self.self_attention(
-            query=red_embs,
-            key=red_embs,
-            value=red_embs,
-            key_padding_mask=red_mask,
-            need_weights=False,
-        )
+        Inputs are expected as dense champion indices with 0 meaning "empty".
+        When ``offset_tokens`` is ``True``, non-zero entries are shifted by +1 so
+        that 0 can be reserved for padding.
+        """
+        blue_picks = _ensure_2d(blue_picks).long()
+        red_picks = _ensure_2d(red_picks).long()
+        blue_bans = _ensure_2d(blue_bans).long()
+        red_bans = _ensure_2d(red_bans).long()
 
-        blue_cross = self._attend(blue_embs, red_embs, red_embs, red_mask)
-        red_cross = self._attend(red_embs, blue_embs, blue_embs, blue_mask)
+        sources = {
+            ("pick", "blue"): blue_picks,
+            ("pick", "red"): red_picks,
+            ("ban", "blue"): blue_bans,
+            ("ban", "red"): red_bans,
+        }
+        steps = [sources[(kind, team)][:, idx] for kind, team, idx in DRAFT_ORDER]
+        sequence = torch.stack(steps, dim=1)
+        if offset_tokens:
+            sequence = sequence.clone()
+            sequence[sequence != 0] += 1
+        return sequence
 
-        blue_team = self._team_representation(blue_self, blue_cross, blue_mask)
-        red_team = self._team_representation(red_self, red_cross, red_mask)
-        logits = self.head(torch.cat([blue_team, red_team], dim=-1))
+    def forward(self, draft_sequence: torch.Tensor) -> torch.Tensor:
+        """Return win logits for the blue team.
+
+        Args:
+            draft_sequence: LongTensor ``(B, T)`` with ordered draft tokens.
+                            0 = padding, 1..N = champion index + 1.
+        """
+        draft_sequence = _ensure_2d(draft_sequence)
+        if draft_sequence.size(1) > self.max_seq_len:
+            raise ValueError(f"Sequence length {draft_sequence.size(1)} exceeds max_seq_len={self.max_seq_len}.")
+
+        padding_mask = draft_sequence == 0
+        B, T = draft_sequence.shape
+        positions = torch.arange(T, device=draft_sequence.device).unsqueeze(0).expand(B, -1)
+        x = self.token_emb(draft_sequence) * math.sqrt(self.d_model)
+        x = self.dropout(x + self.pos_emb(positions))
+        x = self.transformer(x, src_key_padding_mask=padding_mask)
+
+        x = x.masked_fill(padding_mask.unsqueeze(-1), 0.0)
+        lengths = (~padding_mask).sum(dim=1).clamp(min=1).unsqueeze(-1)
+        pooled = x.sum(dim=1) / lengths
+        logits = self.head(pooled)
         return logits.squeeze(-1)
 
     @torch.no_grad()
-    def predict_proba(
-        self,
-        blue_picks: torch.Tensor,
-        red_picks: torch.Tensor,
-        blue_bans: torch.Tensor,
-        red_bans: torch.Tensor,
-    ) -> torch.Tensor:
+    def predict_proba(self, draft_sequence: torch.Tensor) -> torch.Tensor:
         """Return blue win probabilities as a tensor."""
         self.eval()
-        logits = self(blue_picks, red_picks, blue_bans, red_bans)
+        logits = self(draft_sequence)
         return torch.sigmoid(logits)
