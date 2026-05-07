@@ -64,7 +64,7 @@ def load_models(champion_ids: tuple[int, ...]) -> tuple[ChampionEncoder, DraftSt
     return champ_enc, state_enc, models
 
 
-def _predict_scores(model_name: str, model: object, features: np.ndarray) -> np.ndarray:
+def _predict_probabilities(model_name: str, model: object, features: np.ndarray) -> np.ndarray:
     if model_name == "MLP":
         with torch.no_grad():
             logits = model.net(torch.tensor(features, dtype=torch.float32))
@@ -86,9 +86,8 @@ def _find_duplicates(groups: Iterable[Iterable[int]]) -> list[int]:
 
 def _mask_scores(scores: np.ndarray, unavailable: list[int]) -> np.ndarray:
     masked = scores.copy()
-    for idx in unavailable:
-        if 0 <= idx < masked.shape[0]:
-            masked[idx] = 0.0
+    if unavailable:
+        masked[unavailable] = 0.0
     return masked
 
 
@@ -161,7 +160,7 @@ def main() -> None:
             "team": team,
         }
         features = state_enc.encode_batch([row])
-        scores = _predict_scores(model_name, models[model_name], features)[0]
+        scores = _predict_probabilities(model_name, models[model_name], features)[0]
 
         unavailable_ids = set(blue_picks + red_picks + blue_bans + red_bans)
         unavailable_idx = [champ_enc.encode(cid) for cid in unavailable_ids]
@@ -171,14 +170,17 @@ def main() -> None:
         recommendations = [
             {
                 "Champion ID": champ_enc.decode(int(idx)),
-                "Win Probability": float(masked_scores[idx]),
+                "Win Probability (signal)": float(masked_scores[idx]),
                 "Rank": rank + 1,
             }
             for rank, idx in enumerate(top_idx)
         ]
 
         if recommendations:
-            st.metric("Predicted win probability (top pick)", f"{recommendations[0]['Win Probability']:.1%}")
+            st.metric(
+                "Win probability signal (top pick)",
+                f"{recommendations[0]['Win Probability (signal)']:.1%}",
+            )
             st.subheader("Top recommendations")
             st.dataframe(pd.DataFrame(recommendations), hide_index=True, use_container_width=True)
         else:
