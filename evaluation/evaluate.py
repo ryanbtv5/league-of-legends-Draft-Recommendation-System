@@ -159,6 +159,7 @@ def evaluate_all(
     _, test_idx, _, y_test = train_test_split(indices, y, test_size=0.15, random_state=SEED)
     X_test = X[test_idx]
     df_test = df.iloc[test_idx].reset_index(drop=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     results: list[dict] = []
 
@@ -175,11 +176,10 @@ def evaluate_all(
 
         examples = _error_examples(df_test, y_test, scores, champ_enc, k=max(K_VALUES), max_examples=error_examples)
         examples_path = output_dir / f"{name.lower().replace(' ', '_')}_errors.json"
-        output_dir.mkdir(parents=True, exist_ok=True)
         examples_path.write_text(json.dumps(examples, indent=2))
         logger.info("Saved %s error examples to %s", name, examples_path)
         if examples:
-            logger.info("Sample %s errors: %s", name, examples[: min(3, len(examples))])
+            logger.info("Sample %s errors: %s", name, examples[:3])
 
     # ── XGBoost ──────────────────────────────────────────────────────────────
     xgb_path = MODEL_DIR / "xgb_recommender.pkl"
