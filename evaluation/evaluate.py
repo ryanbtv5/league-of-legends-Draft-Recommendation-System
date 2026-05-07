@@ -42,6 +42,7 @@ def _align_scores(scores: np.ndarray, classes: np.ndarray, num_classes: int) -> 
 
 
 def _multiclass_auc(y_true: np.ndarray, scores: np.ndarray) -> float:
+    """Compute macro OVR AUC for multiclass predictions, returning NaN on failure."""
     try:
         return float(roc_auc_score(y_true, scores, multi_class="ovr", average="macro"))
     except ValueError:
@@ -49,6 +50,7 @@ def _multiclass_auc(y_true: np.ndarray, scores: np.ndarray) -> float:
 
 
 def _draft_summary(row: pd.Series) -> dict[str, object]:
+    """Summarize available draft fields from a row for error analysis output."""
     summary: dict[str, object] = {}
 
     def _values(prefix: str) -> list[int] | None:
@@ -79,6 +81,7 @@ def _draft_summary(row: pd.Series) -> dict[str, object]:
 
 
 def _to_serializable(value: object) -> object:
+    """Convert numpy/pandas values into JSON-serializable Python types."""
     if isinstance(value, np.ndarray):
         return value.tolist()
     if isinstance(value, (list, tuple)):
