@@ -13,7 +13,7 @@ ranking problem over the champion pool.
 
 | Tier | Model | Approach |
 |------|-------|----------|
-| Baseline | **XGBoost / Random Forest** | Multi-hot draft-state → champion ranking |
+| Baseline | **Random Forest** | Multi-hot draft-state → champion ranking |
 | Neural | **MLP with Champion Embeddings** | Learned embeddings + pick/ban context |
 | Advanced | **Causal Transformer** | Draft sequence as ordered tokens |
 
@@ -41,7 +41,7 @@ league-of-legends-Draft-Recommendation-System/
 │   │   ├── champion_encoder.py   # Champion ID ↔ index + multi-hot encoding
 │   │   └── synergy_counter.py    # Pairwise synergy & counter matrices
 │   ├── models/
-│   │   ├── baseline.py     # XGBoost / Random Forest recommender
+│   │   ├── baseline.py     # Random Forest recommender
 │   │   ├── neural.py       # MLP with champion embeddings (PyTorch)
 │   │   ├── transformer.py  # Causal Transformer (PyTorch)
 │   │   └── train.py        # End-to-end training CLI
@@ -112,8 +112,8 @@ python -m src.data.preprocess --input data/raw/match_data.jsonl
 ### 4. Train a model
 
 ```bash
-# XGBoost baseline (fast)
-python -m src.models.train --model xgb
+# Random Forest baseline (fast)
+python -m src.models.train --model rf
 
 # MLP with embeddings
 python -m src.models.train --model mlp --epochs 50

@@ -41,16 +41,16 @@ class ModelRegistry:
     def __init__(self) -> None:
         self.champ_enc: ChampionEncoder = ChampionEncoder()
         self.state_enc: DraftStateEncoder = DraftStateEncoder(self.champ_enc)
-        self._xgb: bm.XGBoostRecommender | None = None
+        self._rf: bm.RandomForestRecommender | None = None
         self._mlp: Any | None = None
         self._transformer: Any | None = None
 
     def load_all(self) -> None:
         """Attempt to load all available model checkpoints."""
-        xgb_path = MODEL_DIR / "xgb_recommender.pkl"
-        if xgb_path.exists():
-            self._xgb = bm.XGBoostRecommender.load(xgb_path)
-            logger.info("Loaded XGBoost model")
+        rf_path = MODEL_DIR / "rf_recommender.pkl"
+        if rf_path.exists():
+            self._rf = bm.RandomForestRecommender.load(rf_path)
+            logger.info("Loaded Random Forest model")
 
         mlp_path = MODEL_DIR / "mlp_recommender_best.pt"
         if mlp_path.exists():
@@ -75,8 +75,8 @@ class ModelRegistry:
     @property
     def loaded_models(self) -> list[str]:
         names: list[str] = []
-        if self._xgb is not None:
-            names.append("xgboost")
+        if self._rf is not None:
+            names.append("random_forest")
         if self._mlp is not None:
             names.append("mlp")
         if self._transformer is not None:
@@ -99,9 +99,9 @@ class ModelRegistry:
         if model_name == "auto":
             model_name = self.loaded_models[-1] if self.loaded_models else "none"
 
-        if model_name == "xgboost" and self._xgb is not None:
-            scores = self._xgb.predict_proba(X)[0]
-            return scores, "xgboost"
+        if model_name == "random_forest" and self._rf is not None:
+            scores = self._rf.predict_proba(X)[0]
+            return scores, "random_forest"
         if model_name == "mlp" and self._mlp is not None:
             import torch
             with torch.no_grad():
@@ -137,7 +137,7 @@ def health() -> HealthResponse:
 @router.post("/recommend", response_model=RecommendationResponse, tags=["draft"])
 def recommend(
     state: DraftState,
-    model: str = Query(default="auto", description="Model to use: xgboost | mlp | transformer | auto"),
+    model: str = Query(default="auto", description="Model to use: random_forest | mlp | transformer | auto"),
 ) -> RecommendationResponse:
     """Return top-k champion recommendations for the current draft state.
 

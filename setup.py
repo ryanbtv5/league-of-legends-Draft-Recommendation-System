@@ -12,7 +12,6 @@ setup(
         "numpy>=1.24.0",
         "pandas>=2.0.0",
         "scikit-learn>=1.3.0",
-        "xgboost>=2.0.0",
         "torch>=2.1.0",
         "fastapi>=0.104.0",
         "pydantic>=2.4.0",

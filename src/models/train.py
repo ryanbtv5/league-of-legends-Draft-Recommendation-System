@@ -2,12 +2,12 @@
 src/models/train.py
 --------------------
 End-to-end training script that covers all three model tiers:
-  - XGBoost baseline
+  - Random Forest baseline
   - MLP with champion embeddings
   - Transformer sequence model
 
 Usage:
-    python -m src.models.train --model xgb
+    python -m src.models.train --model rf
     python -m src.models.train --model mlp --epochs 50
     python -m src.models.train --model transformer --epochs 100
 """
@@ -77,25 +77,26 @@ def _load_sequence_data(df: pd.DataFrame, encoder: ChampionEncoder, max_len: int
 # Training routines
 # ---------------------------------------------------------------------------
 
-def train_xgb(df: pd.DataFrame, encoder: DraftStateEncoder) -> None:
+def train_rf(df: pd.DataFrame, encoder: DraftStateEncoder) -> None:
     cfg = load_config()["model"]["baseline"]
+    rf_params = {k: v for k, v in cfg.items() if k != "type"}
     X, y = _load_flat_data(df, encoder)
     X_tr, X_val, y_tr, y_val = train_test_split(X, y, test_size=0.15, random_state=SEED)
 
     mlflow.set_tracking_uri(get("mlflow.tracking_uri", "mlruns"))
     mlflow.set_experiment(get("mlflow.experiment_name", "draft-recommendation"))
 
-    with mlflow.start_run(run_name="xgb_baseline"):
-        mlflow.log_params(cfg)
-        model = bm.XGBoostRecommender(num_champions=encoder.enc.num_champions)
-        model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)])
+    with mlflow.start_run(run_name="rf_baseline"):
+        mlflow.log_params(rf_params)
+        model = bm.RandomForestRecommender(num_champions=encoder.enc.num_champions, params=rf_params)
+        model.fit(X_tr, y_tr)
 
         probs = model.predict_proba(X_val)
         top1 = (probs.argmax(axis=1) == y_val).mean()
         mlflow.log_metric("val_top1_acc", top1)
-        logger.info("XGB validation top-1 accuracy: %.4f", top1)
+        logger.info("Random Forest validation top-1 accuracy: %.4f", top1)
 
-        path = model.save(MODEL_DIR / "xgb_recommender.pkl")
+        path = model.save(MODEL_DIR / "rf_recommender.pkl")
         mlflow.log_artifact(str(path))
 
 
@@ -206,7 +207,7 @@ def train_transformer(df: pd.DataFrame, encoder: ChampionEncoder, epochs: int = 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a draft recommendation model")
-    parser.add_argument("--model", choices=["xgb", "mlp", "transformer"], default="xgb")
+    parser.add_argument("--model", choices=["rf", "mlp", "transformer"], default="rf")
     parser.add_argument("--data", default="data/processed/drafts.parquet")
     parser.add_argument("--epochs", type=int, default=None)
     return parser.parse_args()
@@ -219,8 +220,8 @@ if __name__ == "__main__":
     champ_enc = ChampionEncoder(all_champion_ids)
     state_enc = DraftStateEncoder(champ_enc)
 
-    if args.model == "xgb":
-        train_xgb(df, state_enc)
+    if args.model == "rf":
+        train_rf(df, state_enc)
     elif args.model == "mlp":
         epochs = args.epochs or get("model.neural.epochs", 50)
         train_mlp(df, state_enc, epochs=epochs)

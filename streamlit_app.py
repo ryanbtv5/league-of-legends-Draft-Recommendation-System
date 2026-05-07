@@ -53,9 +53,9 @@ def load_models(champion_ids: tuple[int, ...]) -> tuple[ChampionEncoder, DraftSt
     state_enc = DraftStateEncoder(champ_enc)
     models: dict[str, object] = {}
 
-    xgb_path = MODEL_DIR / "xgb_recommender.pkl"
-    if xgb_path.exists():
-        models["XGBoost"] = bm.XGBoostRecommender.load(xgb_path)
+    rf_path = MODEL_DIR / "rf_recommender.pkl"
+    if rf_path.exists():
+        models["Random Forest"] = bm.RandomForestRecommender.load(rf_path)
 
     mlp_path = MODEL_DIR / "mlp_recommender_best.pt"
     if mlp_path.exists():
