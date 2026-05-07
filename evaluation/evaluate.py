@@ -184,16 +184,6 @@ def evaluate_all(
         if examples:
             logger.info("Sample %s errors: %s", name, examples[:3])
 
-    # ── XGBoost ──────────────────────────────────────────────────────────────
-    xgb_path = MODEL_DIR / "xgb_recommender.pkl"
-    if xgb_path.exists():
-        logger.info("Evaluating XGBoost …")
-        model = bm.XGBoostRecommender.load(xgb_path)
-        scores = model.predict_proba(X_test)
-        _evaluate_model("XGBoost", scores)
-    else:
-        logger.warning("XGBoost model not found at %s", xgb_path)
-
     # ── Random Forest ─────────────────────────────────────────────────────────
     rf_path = MODEL_DIR / "rf_recommender.pkl"
     if rf_path.exists():

@@ -25,12 +25,9 @@ features:
 
 model:
   baseline:
-    type: "xgboost"
+    type: "random_forest"
     n_estimators: 300
-    max_depth: 6
-    learning_rate: 0.05
-    subsample: 0.8
-    colsample_bytree: 0.8
+    max_depth: 10
   neural:
     type: "mlp"
     hidden_dims: [256, 128, 64]
