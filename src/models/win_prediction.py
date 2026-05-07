@@ -3,11 +3,11 @@ src/models/win_prediction.py
 ----------------------------
 Transformer-based win-probability model that treats the draft as a sequence.
 
-Draft order (standard pick/ban phases):
-  B1, R1, B2, R2, B3, R3,
-  B1, R1, R2, B2, B3, R3,
-  R4, B4, R5, B5,
-  R4, B4, B5, R5
+ Draft order (standard pick/ban phases):
+  Ban phase 1:  B1, R1, B2, R2, B3, R3
+  Pick phase 1: B1, R1, R2, B2, B3, R3
+  Ban phase 2:  R4, B4, R5, B5
+  Pick phase 2: R4, B4, B5, R5
 
 Tokens are champion indices with 0 reserved for padding. Use the helper
 ``build_sequence`` to interleave team picks/bans into the ordered sequence.
@@ -156,8 +156,8 @@ class DraftWinPredictor(nn.Module):
         padding_mask = draft_sequence == 0
         B, T = draft_sequence.shape
         positions = torch.arange(T, device=draft_sequence.device).unsqueeze(0).expand(B, -1)
-        x = self.token_emb(draft_sequence) + self.pos_emb(positions)
-        x = self.dropout(x * math.sqrt(self.d_model))
+        x = self.token_emb(draft_sequence) * math.sqrt(self.d_model)
+        x = self.dropout(x + self.pos_emb(positions))
         x = self.transformer(x, src_key_padding_mask=padding_mask)
 
         x = x.masked_fill(padding_mask.unsqueeze(-1), 0.0)
