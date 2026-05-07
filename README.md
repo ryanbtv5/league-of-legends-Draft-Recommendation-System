@@ -141,6 +141,15 @@ uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
 
 Open `http://localhost:8000/docs` for the interactive Swagger UI.
 
+### 7. Run the Streamlit app
+
+```bash
+streamlit run streamlit_app.py
+```
+
+The app lets you enter the current draft (picks/bans) and returns top-5
+recommendations with a win-probability signal.
+
 #### Example API request
 
 ```bash
