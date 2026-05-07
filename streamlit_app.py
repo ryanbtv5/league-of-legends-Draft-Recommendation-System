@@ -29,7 +29,7 @@ ROLES: list[str] = get("data.roles", ["TOP", "JUNGLE", "MID", "ADC", "SUPPORT"])
 
 
 @st.cache_data(show_spinner=False)
-def load_champion_ids(data_path: pathlib.Path) -> list[int]:
+def load_champion_ids(data_path: pathlib.Path) -> tuple[list[int], bool]:
     if data_path.exists():
         try:
             df = pd.read_parquet(data_path, columns=["champion_id"])
@@ -41,10 +41,10 @@ def load_champion_ids(data_path: pathlib.Path) -> list[int]:
                 }
             )
             if champion_ids:
-                return champion_ids
+                return champion_ids, False
         except Exception as exc:
             logger.warning("Could not read champion IDs from %s: %s", data_path, exc)
-    return list(range(NUM_CHAMPIONS))
+    return list(range(NUM_CHAMPIONS)), True
 
 
 @st.cache_resource(show_spinner=False)
@@ -67,7 +67,9 @@ def load_models(champion_ids: tuple[int, ...]) -> tuple[ChampionEncoder, DraftSt
 def _predict_probabilities(model_name: str, model: object, features: np.ndarray) -> np.ndarray:
     if model_name == "MLP":
         with torch.no_grad():
-            logits = model.net(torch.tensor(features, dtype=torch.float32))
+            device = next(model.parameters()).device
+            inputs = torch.from_numpy(features).float().to(device)
+            logits = model.net(inputs)
             return torch.softmax(logits, dim=-1).cpu().numpy()
     return model.predict_proba(features)
 
@@ -100,7 +102,9 @@ def main() -> None:
     data_path = pathlib.Path(
         st.sidebar.text_input("Champion source (drafts.parquet)", str(DEFAULT_DATA_PATH))
     )
-    champion_ids = load_champion_ids(data_path)
+    champion_ids, used_fallback_ids = load_champion_ids(data_path)
+    if used_fallback_ids:
+        st.sidebar.info("Using default champion IDs (0..N-1). Provide drafts.parquet for dataset IDs.")
     champ_enc, state_enc, models = load_models(tuple(champion_ids))
 
     if not models:
@@ -163,7 +167,7 @@ def main() -> None:
         scores = _predict_probabilities(model_name, models[model_name], features)[0]
 
         unavailable_ids = set(blue_picks + red_picks + blue_bans + red_bans)
-        unavailable_idx = [champ_enc.encode(cid) for cid in unavailable_ids]
+        unavailable_idx = [champ_enc.encode(cid) for cid in sorted(unavailable_ids)]
         masked_scores = _mask_scores(scores, unavailable_idx)
 
         top_idx = np.argsort(masked_scores)[::-1][:top_k]
