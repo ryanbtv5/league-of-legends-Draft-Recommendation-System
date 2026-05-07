@@ -104,7 +104,7 @@ def main() -> None:
     champ_enc, state_enc, models = load_models(tuple(champion_ids))
 
     if not models:
-        st.error("No trained models found in ./models. Train a model before running the app.")
+        st.error(f"No trained models found in {MODEL_DIR}. Train a model before running the app.")
         st.stop()
 
     model_order = list(models.keys())
