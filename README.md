@@ -116,7 +116,10 @@ python -m src.data.preprocess --input data/raw/match_data.jsonl
 python -m src.models.train --model rf
 
 # MLP with embeddings
-python -m src.models.train --model mlp --epochs 50
+python -m src.models.train --model mlp --epochs 30
+
+# Resume MLP training from the best checkpoint
+python -m src.models.train --model mlp --epochs 30 --resume-from models/mlp_recommender_best.pt
 
 # Transformer (best accuracy, slowest)
 python -m src.models.train --model transformer --epochs 60
@@ -126,11 +129,11 @@ python -m src.models.train --model transformer --epochs 60 --resume-from models/
 
 ```
 
-Additional: train the win-probability predictor (separate or run as part of transformer flow):
+Additional: train the win-probability predictor (**Note**: win outcome prediction from draft state alone is ~50% baseline—difficult without player skill, patch context, and macro play):
 
 ```bash
-# Train only the win predictor
-python -m src.models.train --model win --epochs 5
+# Train only the win predictor (optional; difficult task)
+python -m src.models.train --model win
 
 # When you train the transformer (above) the win predictor is also trained
 # automatically as part of the pipeline (configurable via `model.win_predictor`).

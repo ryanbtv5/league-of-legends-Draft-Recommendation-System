@@ -274,4 +274,150 @@ def evaluate_epoch(
         for tokens, targets in loader:
             tokens, targets = tokens.to(device), targets.to(device)
             padding_mask = (tokens == 0)
-            logits = model(tokens,
+            logits = model(tokens, src_key_padding_mask=padding_mask)
+            B, T, V = logits.shape
+            logits_flat = logits.reshape(B * T, V)
+            targets_flat = targets.reshape(B * T)
+            valid = targets_flat != 0
+            if not valid.any():
+                continue
+            loss = F.cross_entropy(logits_flat[valid], targets_flat[valid])
+            total_loss += loss.item() * B
+
+    return total_loss / len(loader.dataset)
+
+
+def build_sequence_dataloader(
+    sequences: np.ndarray,
+    batch_size: int = 256,
+    shuffle: bool = True,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+) -> DataLoader:
+    """Build a DataLoader for sequence next-token prediction.
+
+    Args:
+        sequences: Integer array ``(N, T+1)`` of token IDs.  Input is
+                   ``sequences[:, :-1]`` and target is ``sequences[:, 1:]``.
+        batch_size: Mini-batch size.
+        shuffle:    Whether to shuffle.
+    """
+    tokens = torch.tensor(sequences[:, :-1], dtype=torch.long)
+    targets = torch.tensor(sequences[:, 1:], dtype=torch.long)
+    dataset = TensorDataset(tokens, targets)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=max(0, num_workers),
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
+    )
+
+
+def save_model(
+    model: DraftTransformer,
+    path: pathlib.Path | None = None,
+    optimizer_state: dict | None = None,
+    scheduler_state: dict | None = None,
+    epoch: int | None = None,
+) -> pathlib.Path:
+    """Save model checkpoint with optional optimizer and scheduler state."""
+    path = path or MODEL_DIR / "transformer_recommender.pt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ckpt = {
+        "state_dict": model.state_dict(),
+        "num_champions": model.num_champions,
+        "d_model": model.d_model,
+        "nhead": model.nhead,
+        "num_layers": model.num_layers,
+        "dim_feedforward": model.dim_feedforward,
+        "dropout": model.dropout,
+        "max_seq_len": model.max_seq_len,
+    }
+    if optimizer_state is not None:
+        ckpt["optimizer_state"] = optimizer_state
+    if scheduler_state is not None:
+        ckpt["scheduler_state"] = scheduler_state
+    if epoch is not None:
+        ckpt["epoch"] = epoch
+    torch.save(ckpt, path)
+    logger.info("Saved DraftTransformer to %s", path)
+    return path
+
+
+def load_model(path: pathlib.Path, device: torch.device | None = None) -> DraftTransformer:
+    """Load a DraftTransformer from a checkpoint file using a guarded torch.load.
+
+    Uses a short threaded timeout so the caller can recover from blocking file I/O.
+    """
+    device = device or torch.device("cpu")
+
+    def _torch_load(p):
+        return torch.load(p, map_location=device)
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(functools.partial(_torch_load, path))
+            ckpt = future.result(timeout=8)
+    except concurrent.futures.TimeoutError as e:
+        logger.warning("torch.load timeout when loading %s: %s", path, e)
+        raise TimeoutError("Model load timed out") from e
+
+    arch = _infer_architecture_from_state_dict(ckpt["state_dict"])
+    model = DraftTransformer(
+        num_champions=ckpt.get("num_champions", arch["num_champions"]),
+        d_model=ckpt.get("d_model", arch["d_model"]),
+        nhead=ckpt.get("nhead", arch["nhead"]),
+        num_layers=ckpt.get("num_layers", arch["num_layers"]),
+        dim_feedforward=ckpt.get("dim_feedforward", arch["dim_feedforward"]),
+        dropout=ckpt.get("dropout", arch["dropout"]),
+        max_seq_len=ckpt.get("max_seq_len", arch["max_seq_len"]),
+    )
+    model.load_state_dict(ckpt["state_dict"])
+    model.to(device)
+    logger.info("Loaded DraftTransformer from %s", path)
+    return model
+
+
+def load_checkpoint(
+    path: pathlib.Path,
+    device: torch.device | None = None,
+) -> tuple[DraftTransformer, dict | None, dict | None, int]:
+    """Load checkpoint with model, optimizer state, scheduler state, and epoch using direct pickle.
+    
+    Returns:
+        Tuple of (model, optimizer_state, scheduler_state, epoch).
+        optimizer_state and scheduler_state are None if not in checkpoint.
+        epoch defaults to 0 if not in checkpoint.
+    """
+    device = device or torch.device("cpu")
+    def _torch_load(p):
+        return torch.load(p, map_location=device)
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(functools.partial(_torch_load, path))
+            ckpt = future.result(timeout=8)
+    except concurrent.futures.TimeoutError as e:
+        logger.warning("torch.load timeout when loading %s: %s", path, e)
+        raise TimeoutError("Checkpoint load timed out") from e
+    
+    arch = _infer_architecture_from_state_dict(ckpt["state_dict"])
+    model = DraftTransformer(
+        num_champions=ckpt.get("num_champions", arch["num_champions"]),
+        d_model=ckpt.get("d_model", arch["d_model"]),
+        nhead=ckpt.get("nhead", arch["nhead"]),
+        num_layers=ckpt.get("num_layers", arch["num_layers"]),
+        dim_feedforward=ckpt.get("dim_feedforward", arch["dim_feedforward"]),
+        dropout=ckpt.get("dropout", arch["dropout"]),
+        max_seq_len=ckpt.get("max_seq_len", arch["max_seq_len"]),
+    )
+    model.load_state_dict(ckpt["state_dict"])
+    model.to(device)
+    
+    optimizer_state = ckpt.get("optimizer_state")
+    scheduler_state = ckpt.get("scheduler_state")
+    epoch = ckpt.get("epoch", 0)
+    
+    logger.info("Loaded DraftTransformer from %s (epoch %d)", path, epoch)
+    return model, optimizer_state, scheduler_state, epoch

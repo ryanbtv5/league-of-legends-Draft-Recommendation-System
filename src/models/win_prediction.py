@@ -78,11 +78,13 @@ class DraftWinPredictor(nn.Module):
         dim_feedforward: int = DIM_FF,
         dropout: float = DROPOUT,
         max_seq_len: int = MAX_SEQ_LEN,
+        extra_feat_dim: int = 0,
     ) -> None:
         super().__init__()
         self.num_champions = num_champions
         self.d_model = d_model
         self.max_seq_len = max_seq_len
+        self.extra_feat_dim = extra_feat_dim
 
         vocab_size = num_champions + 2
         self.token_emb = nn.Embedding(vocab_size, d_model, padding_idx=0)
@@ -102,9 +104,10 @@ class DraftWinPredictor(nn.Module):
             enable_nested_tensor=False,
         )
 
+        head_in = d_model + (extra_feat_dim or 0)
         self.head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, d_model),
+            nn.LayerNorm(head_in),
+            nn.Linear(head_in, d_model),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(d_model, 1),
@@ -120,7 +123,7 @@ class DraftWinPredictor(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
-    def forward(self, draft_sequence: torch.Tensor) -> torch.Tensor:
+    def forward(self, draft_sequence: torch.Tensor, extra_feats: torch.Tensor | None = None) -> torch.Tensor:
         """Return logits for the blue team.
 
         Args:
@@ -140,6 +143,11 @@ class DraftWinPredictor(nn.Module):
         x = x.masked_fill(padding_mask.unsqueeze(-1), 0.0)
         lengths = (~padding_mask).sum(dim=1).clamp(min=1).unsqueeze(-1)
         pooled = x.sum(dim=1) / lengths
+        if extra_feats is not None:
+            extra = extra_feats.to(pooled.dtype)
+            if extra.dim() == 1:
+                extra = extra.unsqueeze(0)
+            pooled = torch.cat([pooled, extra], dim=-1)
         logits = self.head(pooled)
         return logits.squeeze(-1)
 

@@ -70,6 +70,47 @@ def _draft_state_from_row(row: pd.Series, team: str) -> dict[str, object]:
     }
 
 
+def _transformer_sequence_from_state(row: pd.Series, champ_enc: ChampionEncoder) -> np.ndarray:
+    """Build a Transformer input sequence from a partial draft state.
+
+    The Transformer was trained on ordered champion pick tokens only, so we
+    reconstruct the observed prefix in true pick order and then pad to the
+    model's expected max length.
+    """
+    blue_picks = list(row.get("blue_picks_so_far", []))
+    red_picks = list(row.get("red_picks_so_far", []))
+
+    draft_order = [
+        ("blue", 0),
+        ("red", 0),
+        ("red", 1),
+        ("blue", 1),
+        ("blue", 2),
+        ("red", 2),
+        ("red", 3),
+        ("blue", 3),
+        ("blue", 4),
+        ("red", 4),
+    ]
+
+    sequence: list[int] = []
+    blue_idx = 0
+    red_idx = 0
+    for team, _ in draft_order:
+        if team == "blue":
+            if blue_idx < len(blue_picks):
+                sequence.append(champ_enc.encode(int(blue_picks[blue_idx])) + 1)
+                blue_idx += 1
+        else:
+            if red_idx < len(red_picks):
+                sequence.append(champ_enc.encode(int(red_picks[red_idx])) + 1)
+                red_idx += 1
+
+    sequence = sequence[: MAX_SEQ_LEN + 1]
+    sequence += [0] * (MAX_SEQ_LEN + 1 - len(sequence))
+    return np.array(sequence, dtype=np.int64)
+
+
 def _next_pick_target(current: pd.Series, nxt: pd.Series, team: str) -> int | None:
     columns = BLUE_PICK_COLS if team == "blue" else RED_PICK_COLS
     for col in columns:
@@ -346,34 +387,12 @@ def evaluate_all(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         tm_device = device
         transformer = load_transformer_model(tr_path, tm_device)
-        # Build sequence dataset and dataloader (reuse sequence builder from transformer module)
-        sequences = None
-        try:
-            sequences = []
-            # Reconstruct sequence inputs from df_test quickly using encoder
-            for _, row in df_test.iterrows():
-                # draft_order used in train module; reuse simple order here
-                draft_order = [
-                    "blue_pick_1",
-                    "red_pick_1",
-                    "red_pick_2",
-                    "blue_pick_2",
-                    "blue_pick_3",
-                    "red_pick_3",
-                    "red_pick_4",
-                    "blue_pick_4",
-                    "blue_pick_5",
-                    "red_pick_5",
-                ]
-                seq = [champ_enc.encode(int(row.get(col, 0))) + 1 for col in draft_order if int(row.get(col, 0)) != 0]
-                seq = seq[: MAX_SEQ_LEN + 1]
-                seq += [0] * (MAX_SEQ_LEN + 1 - len(seq))
-                sequences.append(seq)
-            sequences = np.array(sequences, dtype=np.int64)
-        except Exception:
-            sequences = None
+        sequences = np.array([
+            _transformer_sequence_from_state(row, champ_enc)
+            for _, row in df_test.iterrows()
+        ], dtype=np.int64)
 
-        if sequences is not None and len(sequences) > 0:
+        if len(sequences) > 0:
             batch_size = get("model.transformer.batch_size", 256)
             num_workers = 0
             pin_memory = False
@@ -381,9 +400,13 @@ def evaluate_all(
                 num_workers = min(4, (os.cpu_count() or 1) - 1)
                 pin_memory = True
 
-            tr_loader = build_sequence_dataloader(sequences, batch_size=batch_size, shuffle=False)
-            # replace internal dataloader settings with faster ones
-            tr_loader = torch.utils.data.DataLoader(tr_loader.dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
+            tr_loader = build_sequence_dataloader(
+                sequences,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+            )
 
             all_probs: list[np.ndarray] = []
             transformer.eval()
@@ -392,7 +415,7 @@ def evaluate_all(
                 for tokens, _ in tr_loader:
                     tokens = tokens.to(tm_device)
                     logits = transformer(tokens)
-                    probs = torch.softmax(logits[:, -1, :], dim=-1).cpu().numpy()
+                    probs = torch.softmax(logits[:, -1, 1:], dim=-1).cpu().numpy()
                     all_probs.append(probs)
             logger.info("Transformer inference time: %.2fs", time.time() - t0)
             scores = np.concatenate(all_probs, axis=0)
