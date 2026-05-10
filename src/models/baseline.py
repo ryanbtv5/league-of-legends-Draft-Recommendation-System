@@ -35,7 +35,10 @@ _DEFAULT_RF_PARAMS: dict[str, Any] = {
     "n_estimators": get("model.baseline.n_estimators", 300),
     "max_depth": get("model.baseline.max_depth", 10),
     "random_state": get("project.random_seed", 42),
-    "n_jobs": -1,
+    # Use single-threaded inference by default in interactive apps to avoid
+    # excessive thread/process spawning which can cause timeouts or hangs
+    # on some systems (macOS / Streamlit environments).
+    "n_jobs": 1,
 }
 
 
@@ -77,5 +80,12 @@ class RandomForestRecommender:
     def load(cls, path: pathlib.Path) -> "RandomForestRecommender":
         instance = cls.__new__(cls)
         instance.model = joblib.load(path)
+        # Ensure loaded model runs single-threaded in the app to avoid
+        # platform-specific parallelism issues (e.g. OMP/MKL / process timeouts).
+        try:
+            if hasattr(instance.model, "n_jobs"):
+                instance.model.n_jobs = 1
+        except Exception:
+            pass
         instance.num_champions = len(instance.model.classes_)
         return instance
