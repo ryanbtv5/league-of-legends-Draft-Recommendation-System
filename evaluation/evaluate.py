@@ -15,6 +15,9 @@ import pathlib
 
 import numpy as np
 import pandas as pd
+import time
+import os
+import torch
 from sklearn.metrics import accuracy_score, confusion_matrix, roc_auc_score
 from sklearn.model_selection import train_test_split
 
@@ -23,6 +26,7 @@ from src.data.preprocess import load_processed
 from src.features.champion_encoder import ChampionEncoder, DraftStateEncoder
 from src.models import baseline as bm
 from src.models import neural as nm
+from src.models.transformer import MAX_SEQ_LEN, build_sequence_dataloader, load_model as load_transformer_model
 from src.utils.config import get
 from src.utils.logger import get_logger
 
@@ -31,6 +35,68 @@ logger = get_logger(__name__)
 SEED: int = get("project.random_seed", 42)
 MODEL_DIR = pathlib.Path(get("training.model_save_dir", "models"))
 K_VALUES: list[int] = get("evaluation.top_k", [1, 3, 5])
+
+BLUE_PICK_COLS = [f"blue_pick_{i}" for i in range(1, 6)]
+RED_PICK_COLS = [f"red_pick_{i}" for i in range(1, 6)]
+BLUE_BAN_COLS = [f"blue_ban_{i}" for i in range(1, 6)]
+RED_BAN_COLS = [f"red_ban_{i}" for i in range(1, 6)]
+PICK_COLS = BLUE_PICK_COLS + RED_PICK_COLS
+BAN_COLS = BLUE_BAN_COLS + RED_BAN_COLS
+
+
+def _unique_champion_ids(df: pd.DataFrame) -> list[int]:
+    values = df[PICK_COLS + BAN_COLS].to_numpy(dtype=np.int64, copy=False)
+    champion_ids = np.unique(values)
+    return sorted(int(cid) for cid in champion_ids if cid != 0)
+
+
+def _nonzero_values(row: pd.Series, columns: list[str]) -> list[int]:
+    return [int(row[col]) for col in columns if int(row[col]) != 0]
+
+
+def _pick_order(row: pd.Series, team: str) -> int:
+    columns = BLUE_PICK_COLS if team == "blue" else RED_PICK_COLS
+    return sum(1 for col in columns if int(row[col]) != 0)
+
+
+def _draft_state_from_row(row: pd.Series, team: str) -> dict[str, object]:
+    return {
+        "blue_picks_so_far": _nonzero_values(row, BLUE_PICK_COLS),
+        "red_picks_so_far": _nonzero_values(row, RED_PICK_COLS),
+        "blue_bans": _nonzero_values(row, BLUE_BAN_COLS),
+        "red_bans": _nonzero_values(row, RED_BAN_COLS),
+        "pick_order": _pick_order(row, team),
+        "team": team,
+    }
+
+
+def _next_pick_target(current: pd.Series, nxt: pd.Series, team: str) -> int | None:
+    columns = BLUE_PICK_COLS if team == "blue" else RED_PICK_COLS
+    for col in columns:
+        cur_val = int(current[col])
+        next_val = int(nxt[col])
+        if cur_val != next_val and next_val != 0:
+            return next_val
+    return None
+
+
+def _build_recommendation_dataset(df: pd.DataFrame) -> tuple[list[dict[str, object]], np.ndarray]:
+    rows: list[dict[str, object]] = []
+    targets: list[int] = []
+
+    for _, group in df.sort_values(["match_id", "draft_step"]).groupby("match_id", sort=False):
+        match_rows = group.reset_index(drop=True)
+        for idx in range(len(match_rows) - 1):
+            current = match_rows.iloc[idx]
+            nxt = match_rows.iloc[idx + 1]
+            next_team = "blue" if int(nxt["picking_team"]) == 0 else "red"
+            target = _next_pick_target(current, nxt, next_team)
+            if target is None:
+                continue
+            rows.append(_draft_state_from_row(current, next_team))
+            targets.append(target)
+
+    return rows, np.array(targets, dtype=np.int64)
 
 
 def _align_scores(scores: np.ndarray, classes: np.ndarray, num_classes: int) -> np.ndarray:
@@ -131,11 +197,38 @@ def _save_confusion_matrix(
     df.to_csv(output_path)
 
 
-def _flat_data(df: pd.DataFrame, state_enc: DraftStateEncoder) -> tuple[np.ndarray, np.ndarray]:
-    rows = df.to_dict("records")
+def _flat_data(df: pd.DataFrame, state_enc: DraftStateEncoder) -> tuple[list[dict[str, object]], np.ndarray, np.ndarray]:
+    rows, targets = _build_recommendation_dataset(df)
     X = state_enc.encode_batch(rows)
-    y = np.array(state_enc.enc.encode_many(df["champion_id"].tolist()), dtype=np.int64)
-    return X, y
+    y = np.array(state_enc.enc.encode_many(targets.tolist()), dtype=np.int64)
+    return rows, X, y
+
+
+def _mlp_data(rows: list[dict[str, object]], champ_enc: ChampionEncoder) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    n = len(rows)
+    blue_picks = np.zeros((n, 5), dtype=np.int64)
+    red_picks = np.zeros((n, 5), dtype=np.int64)
+    blue_bans = np.zeros((n, 5), dtype=np.int64)
+    red_bans = np.zeros((n, 5), dtype=np.int64)
+    roles = np.zeros((n, 5), dtype=np.float32)
+    teams = np.zeros((n, 2), dtype=np.float32)
+
+    def _pad(ids: list[int], pad_to: int = 5) -> np.ndarray:
+        enc = champ_enc.encode_many([int(cid) for cid in ids if int(cid) != 0])[:pad_to]
+        out = np.zeros(pad_to, dtype=np.int64)
+        if enc:
+            out[: len(enc)] = np.asarray(enc, dtype=np.int64)
+        return out
+
+    for i, row in enumerate(rows):
+        blue_picks[i] = _pad(row.get("blue_picks_so_far", []))
+        red_picks[i] = _pad(row.get("red_picks_so_far", []))
+        blue_bans[i] = _pad(row.get("blue_bans", []))
+        red_bans[i] = _pad(row.get("red_bans", []))
+        roles[i, min(int(row.get("pick_order", 0)), 4)] = 1.0
+        teams[i, 0 if row.get("team", "blue") == "blue" else 1] = 1.0
+
+    return blue_picks, red_picks, blue_bans, red_bans, roles, teams
 
 
 def evaluate_all(
@@ -153,15 +246,15 @@ def evaluate_all(
         :class:`pandas.DataFrame` with one row per model and metric columns.
     """
     df = load_processed(data_path)
-    all_ids = sorted(df["champion_id"].unique().tolist())
+    all_ids = _unique_champion_ids(df)
     champ_enc = ChampionEncoder(all_ids)
     state_enc = DraftStateEncoder(champ_enc)
 
-    X, y = _flat_data(df, state_enc)
-    indices = np.arange(len(df))
+    rows, X, y = _flat_data(df, state_enc)
+    indices = np.arange(len(y))
     _, test_idx, _, y_test = train_test_split(indices, y, test_size=0.15, random_state=SEED)
     X_test = X[test_idx]
-    df_test = df.iloc[test_idx].reset_index(drop=True)
+    df_test = pd.DataFrame(rows).iloc[test_idx].reset_index(drop=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     results: list[dict] = []
@@ -189,7 +282,14 @@ def evaluate_all(
     if rf_path.exists():
         logger.info("Evaluating Random Forest …")
         model = bm.RandomForestRecommender.load(rf_path)
+        # ensure RF uses all CPUs where possible
+        try:
+            model.model.n_jobs = os.cpu_count() or -1
+        except Exception:
+            pass
+        t0 = time.time()
         scores = model.predict_proba(X_test)
+        logger.info("Random Forest predict_proba time: %.2fs", time.time() - t0)
         scores = _align_scores(scores, model.model.classes_, champ_enc.num_champions)
         _evaluate_model("Random Forest", scores)
     else:
@@ -198,21 +298,107 @@ def evaluate_all(
     # ── MLP ──────────────────────────────────────────────────────────────────
     mlp_path = MODEL_DIR / "mlp_recommender_best.pt"
     if mlp_path.exists():
-        import torch
         logger.info("Evaluating MLP …")
-        device = torch.device("cpu")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         mlp = nm.load_model(mlp_path, device)
-        loader = nm.build_dataloader(X_test, y_test, batch_size=512, shuffle=False)
+        batch_size = max(512, get("model.neural.batch_size", 512))
+        num_workers = 0
+        pin_memory = False
+        if torch.cuda.is_available():
+            num_workers = min(4, (os.cpu_count() or 1) - 1)
+            pin_memory = True
+
+        test_rows = df_test.to_dict(orient="records")
+        bp, rp, bb, rb, role, team = _mlp_data(test_rows, champ_enc=champ_enc)
+        dataset = torch.utils.data.TensorDataset(
+            torch.tensor(bp, dtype=torch.long),
+            torch.tensor(rp, dtype=torch.long),
+            torch.tensor(bb, dtype=torch.long),
+            torch.tensor(rb, dtype=torch.long),
+            torch.tensor(role, dtype=torch.float32),
+            torch.tensor(team, dtype=torch.float32),
+        )
+        loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
+
         all_probs: list[np.ndarray] = []
         mlp.eval()
+        t0 = time.time()
         with torch.no_grad():
-            for X_b, _ in loader:
-                logits = mlp.net(X_b.to(device))
+            for bp_b, rp_b, bb_b, rb_b, role_b, team_b in loader:
+                bp_b = bp_b.to(device)
+                rp_b = rp_b.to(device)
+                bb_b = bb_b.to(device)
+                rb_b = rb_b.to(device)
+                role_b = role_b.to(device)
+                team_b = team_b.to(device)
+                logits = mlp(bp_b, rp_b, bb_b, rb_b, role_b, team_b)
                 all_probs.append(torch.softmax(logits, dim=-1).cpu().numpy())
+        logger.info("MLP inference time: %.2fs", time.time() - t0)
         scores = np.concatenate(all_probs, axis=0)
         _evaluate_model("MLP", scores)
     else:
         logger.warning("MLP model not found at %s", mlp_path)
+
+    # ── Transformer (if present) ────────────────────────────────────────────
+    tr_path = MODEL_DIR / "transformer_recommender_best.pt"
+    if tr_path.exists():
+        logger.info("Evaluating Transformer …")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        tm_device = device
+        transformer = load_transformer_model(tr_path, tm_device)
+        # Build sequence dataset and dataloader (reuse sequence builder from transformer module)
+        sequences = None
+        try:
+            sequences = []
+            # Reconstruct sequence inputs from df_test quickly using encoder
+            for _, row in df_test.iterrows():
+                # draft_order used in train module; reuse simple order here
+                draft_order = [
+                    "blue_pick_1",
+                    "red_pick_1",
+                    "red_pick_2",
+                    "blue_pick_2",
+                    "blue_pick_3",
+                    "red_pick_3",
+                    "red_pick_4",
+                    "blue_pick_4",
+                    "blue_pick_5",
+                    "red_pick_5",
+                ]
+                seq = [champ_enc.encode(int(row.get(col, 0))) + 1 for col in draft_order if int(row.get(col, 0)) != 0]
+                seq = seq[: MAX_SEQ_LEN + 1]
+                seq += [0] * (MAX_SEQ_LEN + 1 - len(seq))
+                sequences.append(seq)
+            sequences = np.array(sequences, dtype=np.int64)
+        except Exception:
+            sequences = None
+
+        if sequences is not None and len(sequences) > 0:
+            batch_size = get("model.transformer.batch_size", 256)
+            num_workers = 0
+            pin_memory = False
+            if torch.cuda.is_available():
+                num_workers = min(4, (os.cpu_count() or 1) - 1)
+                pin_memory = True
+
+            tr_loader = build_sequence_dataloader(sequences, batch_size=batch_size, shuffle=False)
+            # replace internal dataloader settings with faster ones
+            tr_loader = torch.utils.data.DataLoader(tr_loader.dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
+
+            all_probs: list[np.ndarray] = []
+            transformer.eval()
+            t0 = time.time()
+            with torch.no_grad():
+                for tokens, _ in tr_loader:
+                    tokens = tokens.to(tm_device)
+                    logits = transformer(tokens)
+                    probs = torch.softmax(logits[:, -1, :], dim=-1).cpu().numpy()
+                    all_probs.append(probs)
+            logger.info("Transformer inference time: %.2fs", time.time() - t0)
+            scores = np.concatenate(all_probs, axis=0)
+            _evaluate_model("Transformer", scores)
+        else:
+            logger.warning("Could not build sequences for Transformer evaluation; skipping.")
 
     if not results:
         logger.error("No models found. Train at least one model first.")

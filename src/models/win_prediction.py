@@ -23,11 +23,11 @@ import torch.nn as nn
 from src.utils.config import get
 
 NUM_CHAMPIONS: int = get("data.num_champions", 165)
-D_MODEL: int = get("model.transformer.d_model", 128)
-NHEAD: int = get("model.transformer.nhead", 4)
-NUM_LAYERS: int = get("model.transformer.num_layers", 3)
-DIM_FF: int = get("model.transformer.dim_feedforward", 256)
-DROPOUT: float = get("model.transformer.dropout", 0.1)
+D_MODEL: int = get("model.win_predictor.d_model", 128)
+NHEAD: int = get("model.win_predictor.nhead", 4)
+NUM_LAYERS: int = get("model.win_predictor.num_layers", 3)
+DIM_FF: int = get("model.win_predictor.dim_feedforward", 256)
+DROPOUT: float = get("model.win_predictor.dropout", 0.1)
 MAX_SEQ_LEN: int = 20
 
 DRAFT_ORDER: list[tuple[str, str, int]] = [
@@ -61,7 +61,13 @@ def _ensure_2d(tensor: torch.Tensor) -> torch.Tensor:
 
 
 class DraftWinPredictor(nn.Module):
-    """Predict blue win probability from a draft sequence."""
+    """Transformer encoder that predicts blue win probability from ordered draft tokens.
+
+    This implementation mirrors the `DraftTransformer` encoder structure but
+    produces a single scalar logit per example by pooling encoder outputs.
+    Input tokens follow the training "dense" format: a sequence of encoded
+    champion indices +1 with 0 used for padding, length padded/truncated to 20.
+    """
 
     def __init__(
         self,
@@ -78,9 +84,9 @@ class DraftWinPredictor(nn.Module):
         self.d_model = d_model
         self.max_seq_len = max_seq_len
 
-        self.token_emb = nn.Embedding(num_champions + 1, d_model, padding_idx=0)
+        vocab_size = num_champions + 2
+        self.token_emb = nn.Embedding(vocab_size, d_model, padding_idx=0)
         self.pos_emb = nn.Embedding(max_seq_len, d_model)
-        self.dropout = nn.Dropout(dropout)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -88,9 +94,14 @@ class DraftWinPredictor(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             batch_first=True,
-            norm_first=True,
+            norm_first=False,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=num_layers,
+            enable_nested_tensor=False,
+        )
+
         self.head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, d_model),
@@ -109,45 +120,11 @@ class DraftWinPredictor(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
-    @staticmethod
-    def build_sequence(
-        blue_picks: torch.Tensor,
-        red_picks: torch.Tensor,
-        blue_bans: torch.Tensor,
-        red_bans: torch.Tensor,
-        *,
-        offset_tokens: bool = True,
-    ) -> torch.Tensor:
-        """Interleave pick/ban tensors into draft order.
-
-        Inputs are expected as dense champion indices with 0 meaning "empty".
-        When ``offset_tokens`` is ``True``, non-zero entries are shifted by +1 so
-        that 0 can be reserved for padding.
-        """
-        blue_picks = _ensure_2d(blue_picks).long()
-        red_picks = _ensure_2d(red_picks).long()
-        blue_bans = _ensure_2d(blue_bans).long()
-        red_bans = _ensure_2d(red_bans).long()
-
-        sources = {
-            ("pick", "blue"): blue_picks,
-            ("pick", "red"): red_picks,
-            ("ban", "blue"): blue_bans,
-            ("ban", "red"): red_bans,
-        }
-        steps = [sources[(kind, team)][:, idx] for kind, team, idx in DRAFT_ORDER]
-        sequence = torch.stack(steps, dim=1)
-        if offset_tokens:
-            sequence = sequence.clone()
-            sequence[sequence != 0] += 1
-        return sequence
-
     def forward(self, draft_sequence: torch.Tensor) -> torch.Tensor:
-        """Return win logits for the blue team.
+        """Return logits for the blue team.
 
         Args:
-            draft_sequence: LongTensor ``(B, T)`` with ordered draft tokens.
-                            0 = padding, 1..N = champion index + 1.
+            draft_sequence: LongTensor (B, T) with tokens following training format.
         """
         draft_sequence = _ensure_2d(draft_sequence)
         if draft_sequence.size(1) > self.max_seq_len:
@@ -157,7 +134,7 @@ class DraftWinPredictor(nn.Module):
         B, T = draft_sequence.shape
         positions = torch.arange(T, device=draft_sequence.device).unsqueeze(0).expand(B, -1)
         x = self.token_emb(draft_sequence) * math.sqrt(self.d_model)
-        x = self.dropout(x + self.pos_emb(positions))
+        x = x + self.pos_emb(positions)
         x = self.transformer(x, src_key_padding_mask=padding_mask)
 
         x = x.masked_fill(padding_mask.unsqueeze(-1), 0.0)

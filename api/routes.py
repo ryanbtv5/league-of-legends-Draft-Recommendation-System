@@ -30,6 +30,29 @@ router = APIRouter()
 MODEL_DIR = pathlib.Path(get("training.model_save_dir", "models"))
 NUM_CHAMPIONS: int = get("data.num_champions", 165)
 
+TRANSFORMER_DRAFT_ORDER: list[tuple[str, str, int]] = [
+    ("ban", "blue", 0),
+    ("ban", "red", 0),
+    ("ban", "blue", 1),
+    ("ban", "red", 1),
+    ("ban", "blue", 2),
+    ("ban", "red", 2),
+    ("pick", "blue", 0),
+    ("pick", "red", 0),
+    ("pick", "red", 1),
+    ("pick", "blue", 1),
+    ("pick", "blue", 2),
+    ("pick", "red", 2),
+    ("ban", "red", 3),
+    ("ban", "blue", 3),
+    ("ban", "red", 4),
+    ("ban", "blue", 4),
+    ("pick", "red", 3),
+    ("pick", "blue", 3),
+    ("pick", "blue", 4),
+    ("pick", "red", 4),
+]
+
 
 # ---------------------------------------------------------------------------
 # Model registry (lazy-loaded singletons)
@@ -85,7 +108,10 @@ class ModelRegistry:
 
     def recommend(self, state: DraftState, model_name: str = "auto") -> tuple[np.ndarray, str]:
         """Run inference and return (scores_array, model_name_used)."""
-        # Build flat feature vector
+        if model_name == "auto":
+            model_name = self.loaded_models[-1] if self.loaded_models else "none"
+
+        # Build flat feature vector for tree/MLP models.
         row = {
             "blue_picks_so_far": state.blue_picks,
             "red_picks_so_far": state.red_picks,
@@ -96,8 +122,24 @@ class ModelRegistry:
         }
         X = self.state_enc.encode_batch([row])
 
-        if model_name == "auto":
-            model_name = self.loaded_models[-1] if self.loaded_models else "none"
+        def _build_transformer_tokens() -> Any:
+            sources = {
+                ("pick", "blue"): state.blue_picks,
+                ("pick", "red"): state.red_picks,
+                ("ban", "blue"): state.blue_bans,
+                ("ban", "red"): state.red_bans,
+            }
+            observed_tokens: list[int] = []
+            for kind, team, idx in TRANSFORMER_DRAFT_ORDER:
+                values = sources[(kind, team)]
+                if idx < len(values):
+                    observed_tokens.append(self.champ_enc.encode(int(values[idx])) + 1)
+            observed_tokens = observed_tokens[:19]
+            observed_tokens.append(0)
+
+            import torch
+
+            return torch.tensor(observed_tokens, dtype=torch.long)
 
         if model_name == "random_forest" and self._rf is not None:
             scores = self._rf.predict_proba(X)[0]
@@ -108,6 +150,14 @@ class ModelRegistry:
                 logits = self._mlp.net(torch.tensor(X, dtype=torch.float32))
                 scores = torch.softmax(logits, dim=-1).numpy()[0]
             return scores, "mlp"
+        if model_name == "transformer" and self._transformer is not None:
+            import torch
+
+            with torch.no_grad():
+                tokens = _build_transformer_tokens().unsqueeze(0)
+                logits = self._transformer(tokens)[:, -1, :]
+                scores = torch.softmax(logits[:, 1:], dim=-1).cpu().numpy()[0]
+            return scores, "transformer"
 
         raise HTTPException(status_code=503, detail=f"Model '{model_name}' not available. Train a model first.")
 

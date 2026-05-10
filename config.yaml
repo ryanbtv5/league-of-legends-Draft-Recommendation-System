@@ -26,30 +26,44 @@ features:
 model:
   baseline:
     type: "random_forest"
-    n_estimators: 300
-    max_depth: 10
+    n_estimators: 200
+    max_depth: 12
+    max_samples: 0.85
   neural:
     type: "mlp"
     hidden_dims: [256, 128, 64]
-    dropout: 0.3
-    learning_rate: 0.001
-    batch_size: 512
+    dropout: 0.25
+    learning_rate: 0.0015
+    batch_size: 1024
     epochs: 50
   transformer:
+    type: "transformer"
+    d_model: 96
+    nhead: 4
+    num_layers: 2
+    dim_feedforward: 192
+    dropout: 0.15
+    learning_rate: 0.0003
+    batch_size: 768
+    epochs: 100
+  win_predictor:
     type: "transformer"
     d_model: 128
     nhead: 4
     num_layers: 3
     dim_feedforward: 256
-    dropout: 0.1
+    dropout: 0.10
     learning_rate: 0.0003
-    batch_size: 256
-    epochs: 100
+    batch_size: 128
+    epochs: 80
 
 training:
   val_split: 0.15
   test_split: 0.15
-  early_stopping_patience: 10
+  early_stopping_patience: 12
+  early_stopping_min_delta: 0.0005
+  num_workers: 4
+  pin_memory: true
   model_save_dir: "models"
 
 evaluation:

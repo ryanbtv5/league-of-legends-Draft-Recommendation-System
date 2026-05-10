@@ -119,7 +119,21 @@ python -m src.models.train --model rf
 python -m src.models.train --model mlp --epochs 50
 
 # Transformer (best accuracy, slowest)
-python -m src.models.train --model transformer --epochs 100
+python -m src.models.train --model transformer --epochs 60
+
+# Resume Transformer training from the best checkpoint
+python -m src.models.train --model transformer --epochs 60 --resume-from models/transformer_recommender_best.pt
+
+```
+
+Additional: train the win-probability predictor (separate or run as part of transformer flow):
+
+```bash
+# Train only the win predictor
+python -m src.models.train --model win --epochs 5
+
+# When you train the transformer (above) the win predictor is also trained
+# automatically as part of the pipeline (configurable via `model.win_predictor`).
 ```
 
 MLflow runs are logged to `mlruns/`.  Launch the UI with:
@@ -133,22 +147,26 @@ mlflow ui
 python -m evaluation.evaluate --data data/processed/drafts.parquet
 ```
 
-### 6. Run the API server
+This evaluation command works with the current draft-state schema and reports
+metrics for the saved Random Forest and MLP models.
 
-```bash
-uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Open `http://localhost:8000/docs` for the interactive Swagger UI.
-
-### 7. Run the Streamlit app
+### 6. Run the Streamlit app
 
 ```bash
 streamlit run streamlit_app.py
 ```
 
-The app lets you enter the current draft (picks/bans) and returns top-5
-recommendations with a win-probability signal.
+The Streamlit app is the main interface. It lets you enter the current draft
+(picks/bans) and returns top-5 recommendations with a win-probability signal.
+It includes Random Forest, MLP, and Transformer model choices when the
+corresponding checkpoints are present in `models/`.
+
+**Startup Optimization:** Models are lazy-loaded only when you click "Recommend",
+so the app UI appears instantly. Champion names are cached after first load.
+On subsequent runs, everything loads from cache (< 1 second).
+
+> The API server is optional and only needed if you want programmatic access
+> or the Swagger docs.
 
 #### Example API request
 
@@ -173,7 +191,7 @@ curl -X POST http://localhost:8000/api/v1/recommend \
 
 ```
 Agent:   Draft assistant
-Inputs:  Current picks, bans, roles, team side
+Inputs:  Current picks, bans, team side
 Actions: Recommend next champion
 Goal:    Maximise win probability
 ```
@@ -181,8 +199,7 @@ Goal:    Maximise win probability
 The problem is framed as **multi-class ranking** rather than binary win
 prediction:
 
-- **Input**: Draft-state feature vector (multi-hot picks/bans + role/team
-  one-hot encodings)
+  **Input**: Draft-state feature vector (multi-hot picks/bans + team one-hot encoding)
 - **Output**: Probability distribution over the champion pool → rank and serve
   the top-k
 

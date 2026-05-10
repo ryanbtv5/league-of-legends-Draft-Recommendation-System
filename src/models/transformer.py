@@ -17,7 +17,7 @@ Architecture:
 Usage:
     from src.models.transformer import DraftTransformer
     model = DraftTransformer()
-    logits = model(tokens)         # (B, seq_len, num_champions)
+    logits = model(tokens)         # (B, seq_len, num_champions + 1)
     next_pick_logits = logits[:, -1, :]  # last position for next-token prediction
 """
 
@@ -29,7 +29,10 @@ import pathlib
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
+import concurrent.futures
+import functools
 
 from src.utils.config import get
 from src.utils.logger import get_logger
@@ -45,6 +48,42 @@ NUM_LAYERS: int = get("model.transformer.num_layers", 3)
 DIM_FF: int = get("model.transformer.dim_feedforward", 256)
 DROPOUT: float = get("model.transformer.dropout", 0.1)
 MAX_SEQ_LEN: int = 20  # 10 bans + 10 picks
+
+
+def _infer_architecture_from_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, int | float]:
+    """Infer Transformer hyperparameters from a saved state dict.
+
+    This keeps legacy checkpoints loadable even if config defaults change.
+    """
+    token_shape = state_dict.get("token_emb.weight")
+    pos_shape = state_dict.get("pos_emb.weight")
+    proj_shape = state_dict.get("proj.weight")
+    linear1 = state_dict.get("transformer.layers.0.linear1.weight")
+    layer_indices: set[int] = set()
+
+    for key in state_dict:
+        if key.startswith("transformer.layers."):
+            parts = key.split(".")
+            if len(parts) > 2 and parts[2].isdigit():
+                layer_indices.add(int(parts[2]))
+
+    num_layers = (max(layer_indices) + 1) if layer_indices else NUM_LAYERS
+    ref_shape = token_shape if token_shape is not None else proj_shape
+    out_shape = proj_shape if proj_shape is not None else token_shape
+    d_model = int(ref_shape.shape[1]) if ref_shape is not None else D_MODEL
+    num_champions = int(out_shape.shape[0] - 1) if out_shape is not None else NUM_CHAMPIONS
+    dim_feedforward = int(linear1.shape[0]) if linear1 is not None else DIM_FF
+    max_seq_len = int(pos_shape.shape[0]) if pos_shape is not None else MAX_SEQ_LEN
+
+    return {
+        "num_champions": num_champions,
+        "d_model": d_model,
+        "nhead": NHEAD,
+        "num_layers": num_layers,
+        "dim_feedforward": dim_feedforward,
+        "dropout": DROPOUT,
+        "max_seq_len": max_seq_len,
+    }
 
 
 class DraftTransformer(nn.Module):
@@ -73,6 +112,10 @@ class DraftTransformer(nn.Module):
         super().__init__()
         self.num_champions = num_champions
         self.d_model = d_model
+        self.nhead = nhead
+        self.num_layers = num_layers
+        self.dim_feedforward = dim_feedforward
+        self.dropout = dropout
         self.max_seq_len = max_seq_len
 
         # Special tokens: 0 = padding, 1..num_champions = champion indices
@@ -86,11 +129,16 @@ class DraftTransformer(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             batch_first=True,
-            norm_first=True,  # pre-norm (more stable)
+            norm_first=False,  # enables nested-tensor fast path on PyTorch
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=num_layers,
+            enable_nested_tensor=False,
+        )
 
-        self.proj = nn.Linear(d_model, num_champions)
+        # Output includes padding token at index 0.
+        self.proj = nn.Linear(d_model, num_champions + 1)
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -117,7 +165,7 @@ class DraftTransformer(nn.Module):
                                   positions (passed through to PyTorch).
 
         Returns:
-            FloatTensor ``(B, T, num_champions)`` — logits at each position.
+            FloatTensor ``(B, T, num_champions + 1)`` — logits at each position.
         """
         B, T = tokens.shape
         positions = torch.arange(T, device=tokens.device).unsqueeze(0).expand(B, -1)
@@ -150,13 +198,15 @@ class DraftTransformer(nn.Module):
             List of *k* champion indices (dense, 0-based) sorted by probability.
         """
         self.eval()
-        logits = self(tokens)[:, -1, :]  # (1, num_champions)
+        logits = self(tokens)[:, -1, :]  # (1, num_champions + 1)
         probs = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
         if unavailable:
             for idx in unavailable:
-                if 0 <= idx < len(probs):
-                    probs[idx] = 0.0
-        return np.argsort(probs)[::-1][:k].tolist()
+                token = idx + 1
+                if 0 <= token < len(probs):
+                    probs[token] = 0.0
+        ranked = np.argsort(probs[1:])[::-1][:k]
+        return ranked.tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +229,6 @@ def train_epoch(
         Mean cross-entropy loss.
     """
     model.train()
-    criterion = nn.CrossEntropyLoss(ignore_index=0)
     total_loss = 0.0
 
     for tokens, targets in loader:
@@ -187,8 +236,14 @@ def train_epoch(
         padding_mask = (tokens == 0)
         logits = model(tokens, src_key_padding_mask=padding_mask)
         B, T, V = logits.shape
-        loss = criterion(logits.reshape(B * T, V), targets.reshape(B * T))
-        optimizer.zero_grad()
+        logits_flat = logits.reshape(B * T, V)
+        targets_flat = targets.reshape(B * T)
+        valid = targets_flat != 0
+        if valid.any():
+            loss = F.cross_entropy(logits_flat[valid], targets_flat[valid])
+        else:
+            continue
+        optimizer.zero_grad(set_to_none=True)
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -213,65 +268,10 @@ def evaluate_epoch(
         Mean cross-entropy loss over the dataset.
     """
     model.eval()
-    criterion = nn.CrossEntropyLoss(ignore_index=0)
     total_loss = 0.0
 
     with torch.no_grad():
         for tokens, targets in loader:
             tokens, targets = tokens.to(device), targets.to(device)
             padding_mask = (tokens == 0)
-            logits = model(tokens, src_key_padding_mask=padding_mask)
-            B, T, V = logits.shape
-            loss = criterion(logits.reshape(B * T, V), targets.reshape(B * T))
-            total_loss += loss.item() * B
-
-    return total_loss / len(loader.dataset)
-
-
-
-    sequences: np.ndarray,
-    batch_size: int = 256,
-    shuffle: bool = True,
-) -> DataLoader:
-    """Build a DataLoader for sequence next-token prediction.
-
-    Args:
-        sequences: Integer array ``(N, T+1)`` of token IDs.  Input is
-                   ``sequences[:, :-1]`` and target is ``sequences[:, 1:]``.
-        batch_size: Mini-batch size.
-        shuffle:    Whether to shuffle.
-    """
-    tokens = torch.tensor(sequences[:, :-1], dtype=torch.long)
-    targets = torch.tensor(sequences[:, 1:], dtype=torch.long)
-    dataset = TensorDataset(tokens, targets)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
-
-
-def save_model(model: DraftTransformer, path: pathlib.Path | None = None) -> pathlib.Path:
-    """Save model checkpoint."""
-    path = path or MODEL_DIR / "transformer_recommender.pt"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "num_champions": model.num_champions,
-            "d_model": model.d_model,
-        },
-        path,
-    )
-    logger.info("Saved DraftTransformer to %s", path)
-    return path
-
-
-def load_model(path: pathlib.Path, device: torch.device | None = None) -> DraftTransformer:
-    """Load a DraftTransformer from a checkpoint file."""
-    device = device or torch.device("cpu")
-    ckpt = torch.load(path, map_location=device)
-    model = DraftTransformer(
-        num_champions=ckpt["num_champions"],
-        d_model=ckpt.get("d_model", D_MODEL),
-    )
-    model.load_state_dict(ckpt["state_dict"])
-    model.to(device)
-    logger.info("Loaded DraftTransformer from %s", path)
-    return model
+            logits = model(tokens,
