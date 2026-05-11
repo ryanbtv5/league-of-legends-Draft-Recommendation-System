@@ -96,6 +96,8 @@ python -m src.data.ingest \
 > in `data/raw/` and skip the ingestion step.
 
 ### 3. Preprocess raw data
+#raw data set used
+#https://www.kaggle.com/datasets/californianbill/patch-25-14-lol-league-of-legends-ranked-games/data?select=match_data.jsonl
 
 ```bash
 python -m src.data.preprocess \
